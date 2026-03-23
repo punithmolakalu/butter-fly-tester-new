@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QApplication,
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar
@@ -85,6 +85,9 @@ INPUT_WIDTH_WIDE = 150
 
 
 class RecipeWindow(QMainWindow):
+    """Emitted with absolute path after SAVE writes the file (main Recipe tab reloads from disk)."""
+    recipe_saved = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(None)
         self.setWindowTitle("NEW RECIPE")
@@ -943,9 +946,9 @@ class RecipeWindow(QMainWindow):
         tempstab_layout = QVBoxLayout(tempstab_tab)
         tempstab_layout.setContentsMargins(15, 15, 15, 15)
         tempstab_layout.setSpacing(15)
-        ts1_group = self._create_temp_stability_block("Temperature Stability 1")
+        ts1_group, self._ts1_widgets = self._create_temp_stability_block("Temperature Stability 1")
         tempstab_layout.addWidget(ts1_group)
-        ts2_group = self._create_temp_stability_block("Temperature Stability 2")
+        ts2_group, self._ts2_widgets = self._create_temp_stability_block("Temperature Stability 2")
         tempstab_layout.addWidget(ts2_group)
         tempstab_layout.addWidget(QLabel("Temperature Stability 2 will only run if Temperature Stability 1 passes."))
         tempstab_layout.addStretch()
@@ -959,24 +962,37 @@ class RecipeWindow(QMainWindow):
         ctrl_layout = QFormLayout(ctrl_group)
         ctrl_layout.setSpacing(GROUP_SPACING)
         ctrl_layout.setContentsMargins(*GROUP_MARGINS)
-        ctrl_layout.addRow("MINTemp (C):", QLineEdit("0"))
-        ctrl_layout.addRow("MAXTemp (C):", QLineEdit("0"))
-        ctrl_layout.addRow("INC (C):", QLineEdit("0"))
-        ctrl_layout.addRow("WAIT TIME (ms):", QLineEdit("0"))
-        ctrl_layout.addRow("Set Curr (mA):", QLineEdit("10"))
-        ctrl_layout.addRow("", QCheckBox("Use I@Rated_P"))
-        ctrl_layout.addRow("Init Temp (C):", QLineEdit("0"))
+        min_temp = QLineEdit("0")
+        max_temp = QLineEdit("0")
+        inc = QLineEdit("0")
+        wait_ms = QLineEdit("0")
+        set_curr = QLineEdit("10")
+        use_i_rated = QCheckBox("Use I@Rated_P")
+        init_temp = QLineEdit("0")
+        ctrl_layout.addRow("MINTemp (C):", min_temp)
+        ctrl_layout.addRow("MAXTemp (C):", max_temp)
+        ctrl_layout.addRow("INC (C):", inc)
+        ctrl_layout.addRow("WAIT TIME (ms):", wait_ms)
+        ctrl_layout.addRow("Set Curr (mA):", set_curr)
+        ctrl_layout.addRow("", use_i_rated)
+        ctrl_layout.addRow("Init Temp (C):", init_temp)
         main_layout.addWidget(ctrl_group)
-        main_layout.addWidget(QCheckBox("Save PDF"))
+        save_pdf = QCheckBox("Save PDF")
+        main_layout.addWidget(save_pdf)
         ando_group = QGroupBox("Ando Parameters")
         ando_layout = QFormLayout(ando_group)
         ando_layout.setSpacing(GROUP_SPACING)
         ando_layout.setContentsMargins(*GROUP_MARGINS)
-        ando_layout.addRow("Span:", QLineEdit("0"))
-        ando_layout.addRow("Sampling:", QLineEdit("0"))
-        ando_layout.addRow("", QCheckBox("Continuous Scan"))
-        ando_layout.addRow("Offset1:", QLineEdit("10"))
-        ando_layout.addRow("Offset2:", QLineEdit("0"))
+        span = QLineEdit("0")
+        sampling = QLineEdit("0")
+        continuous_scan = QCheckBox("Continuous Scan")
+        offset1 = QLineEdit("10")
+        offset2 = QLineEdit("0")
+        ando_layout.addRow("Span:", span)
+        ando_layout.addRow("Sampling:", sampling)
+        ando_layout.addRow("", continuous_scan)
+        ando_layout.addRow("Offset1:", offset1)
+        ando_layout.addRow("Offset2:", offset2)
         main_layout.addWidget(ando_group)
         limits_group = QGroupBox("Limits")
         limits_layout = QGridLayout(limits_group)
@@ -993,19 +1009,125 @@ class RecipeWindow(QMainWindow):
             ("WL", "10", "10"),
             ("Power", "0", "")
         ]
+        limits_entries = {}
         for i, (param, ll_val, ul_val) in enumerate(limit_params):
             row = i + 1
             limits_layout.addWidget(QLabel(param), row, 0)
-            limits_layout.addWidget(QLineEdit(ll_val), row, 1)
-            limits_layout.addWidget(QLineEdit(ul_val if ul_val else ""), row, 2)
-            limits_layout.addWidget(QCheckBox(), row, 3)
+            ll_e = QLineEdit(ll_val)
+            ul_e = QLineEdit(ul_val if ul_val else "")
+            en_cb = QCheckBox()
+            limits_layout.addWidget(ll_e, row, 1)
+            limits_layout.addWidget(ul_e, row, 2)
+            limits_layout.addWidget(en_cb, row, 3)
+            limits_entries[param] = {"ll": ll_e, "ul": ul_e, "enable": en_cb}
         main_layout.addWidget(limits_group)
         deg_layout = QHBoxLayout()
         deg_layout.addWidget(QLabel("Deg of Stability:"))
-        deg_layout.addWidget(QLineEdit("5"))
+        deg_stability = QLineEdit("5")
+        deg_layout.addWidget(deg_stability)
         deg_layout.addStretch()
         main_layout.addLayout(deg_layout)
-        return main_group
+        widgets = {
+            "min_temp": min_temp,
+            "max_temp": max_temp,
+            "inc": inc,
+            "wait_ms": wait_ms,
+            "set_curr": set_curr,
+            "use_i_rated": use_i_rated,
+            "init_temp": init_temp,
+            "save_pdf": save_pdf,
+            "span": span,
+            "sampling": sampling,
+            "continuous_scan": continuous_scan,
+            "offset1": offset1,
+            "offset2": offset2,
+            "limits": limits_entries,
+            "deg_stability": deg_stability,
+        }
+        return main_group, widgets
+
+    def _load_temp_stability_widgets(self, widgets_dict, blk, stab):
+        """Fill one TS block from OPERATIONS block dict + optional STABILITY legacy dict."""
+        from operations.recipe_ts_helpers import first_in_dict, first_or_fallback, wait_time_ms_for_display
+
+        if not widgets_dict:
+            return
+        if not isinstance(blk, dict):
+            blk = {}
+        if not isinstance(stab, dict):
+            stab = {}
+
+        def safe_set_text(w, v):
+            if w is None:
+                return
+            w.setText("" if v is None else str(v))
+
+        def safe_set_check(w, v):
+            if w is not None:
+                w.setChecked(bool(v))
+
+        safe_set_text(
+            widgets_dict["min_temp"],
+            first_or_fallback(blk, ("MinTemp", "min_temp", "MINTemp", "min_temp_c"), stab, ("min_temp",)),
+        )
+        safe_set_text(
+            widgets_dict["max_temp"],
+            first_or_fallback(blk, ("MaxTemp", "max_temp", "MAXTemp", "max_temp_c"), stab, ("max_temp",)),
+        )
+        safe_set_text(
+            widgets_dict["inc"],
+            first_or_fallback(
+                blk,
+                ("TempIncrement", "INC", "inc", "TempIncrement_c", "increment_c"),
+                stab,
+                ("inc",),
+            ),
+        )
+        wt = wait_time_ms_for_display(blk, stab)
+        safe_set_text(widgets_dict["wait_ms"], wt if wt != "" else "")
+        safe_set_text(
+            widgets_dict["set_curr"],
+            first_or_fallback(
+                blk,
+                ("Current", "current", "SetCurr", "set_curr", "laser_current_mA"),
+                stab,
+                ("current",),
+            ),
+        )
+        safe_set_text(
+            widgets_dict["init_temp"],
+            first_or_fallback(
+                blk,
+                ("InitTemp", "Init_Temp", "InitialTemp", "initial_temp_c", "MinTemp"),
+                stab,
+                ("temperature",),
+            ),
+        )
+        safe_set_text(widgets_dict["span"], first_in_dict(blk, ("Span", "span_nm", "WideSpan_nm"), ""))
+        safe_set_text(widgets_dict["sampling"], first_in_dict(blk, ("Sampling", "sampling_points", "sampling"), ""))
+        safe_set_text(widgets_dict["offset1"], first_in_dict(blk, ("Offset1", "offset1"), ""))
+        safe_set_text(widgets_dict["offset2"], first_in_dict(blk, ("Offset2", "offset2"), ""))
+        deg = first_in_dict(
+            blk,
+            (
+                "DegOfStability",
+                "deg_stability",
+                "Deg of Stability",
+                "DegOfStability_c",
+                "WavelengthTolerance_nm",
+                "wavelength_tolerance_nm",
+            ),
+            "",
+        )
+        safe_set_text(widgets_dict["deg_stability"], deg)
+
+        lim = blk.get("limits") if isinstance(blk.get("limits"), dict) else {}
+        for param, entries in widgets_dict.get("limits", {}).items():
+            sub = lim.get(param) or lim.get(param.replace(" ", "")) or {}
+            if isinstance(sub, dict):
+                safe_set_text(entries["ll"], sub.get("ll", ""))
+                safe_set_text(entries["ul"], sub.get("ul", ""))
+                safe_set_check(entries["enable"], sub.get("enable", False))
 
     def _browse_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Select Save Directory")
@@ -1030,23 +1152,16 @@ class RecipeWindow(QMainWindow):
 
     def _load_recipe_data(self, filepath: str):
         try:
-            import configparser
-            ext = os.path.splitext(filepath)[1].lower()
-            if ext in ['.json', '.rcp']:
-                with open(filepath, 'r') as f:
-                    data = json.load(f)
-            elif ext == '.ini':
-                config = configparser.ConfigParser()
-                config.read(filepath)
-                data = {section: dict(config[section]) for section in config.sections()}
-            else:
-                try:
-                    with open(filepath, 'r') as f:
-                        data = json.load(f)
-                except Exception:
-                    config = configparser.ConfigParser()
-                    config.read(filepath)
-                    data = {section: dict(config[section]) for section in config.sections()}
+            from operations.recipe_io import load_recipe_file
+
+            data = load_recipe_file(filepath)
+            if not data:
+                QMessageBox.warning(
+                    self,
+                    "Load Error",
+                    "Could not load recipe (empty, invalid, or unsupported format):\n{}".format(filepath),
+                )
+                return
 
             def safe_set_text(widget, value):
                 if value is not None:
@@ -1156,6 +1271,11 @@ class RecipeWindow(QMainWindow):
             wavemeter = spec.get('WAVEMETER', data.get('WAVEMETER', {}))
             if isinstance(wavemeter, dict):
                 safe_set_check(self.smsrCheckBox, wavemeter.get('smsr', False))
+            from operations.recipe_ts_helpers import resolve_temperature_stability_blocks
+
+            ts1, ts2, stab = resolve_temperature_stability_blocks(data)
+            self._load_temp_stability_widgets(getattr(self, "_ts1_widgets", None), ts1, stab)
+            self._load_temp_stability_widgets(getattr(self, "_ts2_widgets", None), ts2, stab)
             # So Save works without Browse: remember file and set save folder.
             self._last_saved_or_loaded_path = os.path.abspath(filepath)
             ddir = os.path.dirname(self._last_saved_or_loaded_path)
@@ -1232,16 +1352,26 @@ class RecipeWindow(QMainWindow):
 
         fiber_coupled = get_checked(self.fiberCoupledCheck)
         wavelength = get_text(self.wavelengthEdit).strip()
+        comments_text = get_text(self.commentsEdit)
+        drive_cur = float(get_value(self.andoCurrentSpin, 0.0))
+        if drive_cur <= 0:
+            drive_cur = float(get_float_from_lineedit(self.ratedCurrentEdit, 0.0))
         recipe = {
+            # Top-level keys: match hand-edited / shipped recipes so load + Run work without relying only on GENERAL.*
+            "Recipe_Name": recipe_name,
+            "Description": comments_text,
+            "TEST_SEQUENCE": test_sequence,
             "FiberCoupled": fiber_coupled,
             "Wavelength": wavelength,
+            "Current": drive_cur,
             "GENERAL": {
                 "RecipeName": recipe_name,
-                "Comments": get_text(self.commentsEdit),
+                "Comments": comments_text,
                 "NumTests": get_value(self.numTestsSpin, 1),
                 "TestSequence": test_sequence,
                 "FiberCoupled": fiber_coupled,
                 "Wavelength": wavelength,
+                "Current": drive_cur,
                 "FPPath": get_checked(self.fpPathCheck),
                 "SavePath": get_text(self.savePathEdit)
             },
@@ -1329,6 +1459,7 @@ class RecipeWindow(QMainWindow):
             self.savePathEdit.setText(os.path.dirname(self._last_saved_or_loaded_path))
             self.save_path = os.path.dirname(self._last_saved_or_loaded_path)
             QMessageBox.information(self, "Saved", f"Recipe saved:\n{filename}")
+            self.recipe_saved.emit(self._last_saved_or_loaded_path)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save recipe:\n{str(e)}")
 

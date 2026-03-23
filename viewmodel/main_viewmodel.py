@@ -13,16 +13,6 @@ from PyQt5.QtWidgets import QApplication
 
 from instruments import connection as conn
 from instruments.connection import PRMConnection
-from instruments.instrument_simulations import PRMSimulationConnection
-from instruments.simulation_config import (
-    simulate_actuator_enabled,
-    simulate_ando_enabled,
-    simulate_arroyo_enabled,
-    simulate_gentec_enabled,
-    simulate_prm_enabled,
-    simulate_thorlabs_enabled,
-    simulate_wavemeter_enabled,
-)
 from workers.workers import (
     ArroyoWorker,
     AndoWorker,
@@ -181,43 +171,12 @@ class MainViewModel(QObject):
 
         self._instrument_manager = SequenceInstrumentBridge(self)
 
-    def start_workers(self):
-        """After UI is up, auto-connect any instrument slots that use simulation (SIM) so footer shows Connected (simulation)."""
-        QTimer.singleShot(0, self.auto_connect_simulated_instruments)
-
-    def auto_connect_simulated_instruments(self) -> None:
-        """
-        Connect software simulators automatically when simulation is enabled for that slot.
-        Real PRM / Gentec / Thorlabs are skipped unless their simulate_* flag is on (e.g. simulate_all).
-        """
-        try:
-            if simulate_arroyo_enabled() and not self._arroyo_connected:
-                self.connect_arroyo("SIM")
-            if simulate_actuator_enabled() and not self._actuator_connected:
-                self.connect_actuator("SIM")
-            if simulate_ando_enabled() and not self._ando_connected:
-                self.connect_ando("SIM")
-            if simulate_wavemeter_enabled() and not self._wavemeter_connected:
-                self.connect_wavemeter("SIM")
-            if simulate_gentec_enabled() and not self._gentec_connected:
-                self.connect_gentec("SIM")
-            if simulate_thorlabs_enabled() and not self._thorlabs_connected:
-                self.connect_thorlabs("SIM::VISA")
-            if simulate_prm_enabled() and not self._prm_connected:
-                self.connect_prm("SIM", reconnecting=False)
-        except Exception:
-            pass
-
     def _on_arroyo_connection_result(self, ok: bool):
         self._arroyo_connecting = False
         self._arroyo_connected = ok
         self.connection_state_changed.emit(self.get_connection_state())
         if ok:
-            a = getattr(self._worker, "_arroyo", None)
-            _sim = bool(getattr(a, "is_simulation", False))
-            self.status_log_message.emit(
-                "Arroyo: Connected (simulation)" if _sim else "Arroyo: Connected"
-            )
+            self.status_log_message.emit("Arroyo: Connected")
         else:
             self.status_log_message.emit("Arroyo: Connection failed")
         if ok:
@@ -249,12 +208,8 @@ class MainViewModel(QObject):
         else:
             self._ando_poll_timer.stop()
         self.connection_state_changed.emit(self.get_connection_state())
-        ando = getattr(self._ando_worker, "_ando", None)
-        _sim = bool(getattr(ando, "is_simulation", False))
         if self._ando_connected:
-            self.status_log_message.emit(
-                "Ando: Connected (simulation)" if _sim else "Ando: Connected"
-            )
+            self.status_log_message.emit("Ando: Connected")
         else:
             self.status_log_message.emit("Ando: Disconnected")
 
@@ -267,12 +222,8 @@ class MainViewModel(QObject):
         else:
             self._actuator_poll_timer.stop()
         self.connection_state_changed.emit(self.get_connection_state())
-        act = getattr(self._actuator_worker, "_actuator", None)
-        _asim = bool(getattr(act, "is_simulation", False))
         if self._actuator_connected:
-            self.status_log_message.emit(
-                "Actuator: Connected (simulation)" if _asim else "Actuator: Connected"
-            )
+            self.status_log_message.emit("Actuator: Connected")
         else:
             self.status_log_message.emit("Actuator: Disconnected")
 
@@ -283,11 +234,7 @@ class MainViewModel(QObject):
         error_msg = state.get("Wavemeter_error")
         self.connection_state_changed.emit(self.get_connection_state())
         if self._wavemeter_connected:
-            wm = getattr(self._wavemeter_worker, "_wavemeter", None)
-            _wsim = bool(getattr(wm, "is_simulation", False))
-            self.status_log_message.emit(
-                "Wavemeter: Connected (simulation)" if _wsim else "Wavemeter: Connected"
-            )
+            self.status_log_message.emit("Wavemeter: Connected")
             self._wavemeter_poll_timer.start()
             self._wavemeter_worker.trigger_read.emit()
         else:
@@ -308,12 +255,8 @@ class MainViewModel(QObject):
         if "Gentec" in state:
             self._gentec_connected = state.get("Gentec", False)
         self.connection_state_changed.emit(self.get_connection_state())
-        g = getattr(self._gentec_worker, "_gentec", None)
-        _gsim = bool(getattr(g, "is_simulation", False))
         if self._gentec_connected:
-            self.status_log_message.emit(
-                "Gentec: Connected (simulation)" if _gsim else "Gentec: Connected"
-            )
+            self.status_log_message.emit("Gentec: Connected")
         else:
             self.status_log_message.emit("Gentec: Disconnected")
         if self._gentec_connected:
@@ -330,13 +273,9 @@ class MainViewModel(QObject):
         if "Thorlabs" in state:
             self._thorlabs_connected = state.get("Thorlabs", False)
         self.connection_state_changed.emit(self.get_connection_state())
-        t = getattr(self._thorlabs_worker, "_thorlabs", None)
-        _tsim = bool(getattr(t, "is_simulation", False))
         err = state.get("Thorlabs_error") if isinstance(state, dict) else None
         if self._thorlabs_connected:
-            self.status_log_message.emit(
-                "Thorlabs: Connected (simulation)" if _tsim else "Thorlabs: Connected"
-            )
+            self.status_log_message.emit("Thorlabs: Connected")
         else:
             if err:
                 self.status_log_message.emit("Thorlabs: Connection failed — {}".format(err))
@@ -445,50 +384,6 @@ class MainViewModel(QObject):
             "Gentec": self._gentec_connected,
             "Thorlabs": self._thorlabs_connected,
         }
-
-    def is_instrument_simulated(self, key: str) -> bool:
-        """
-        True if this slot uses a simulator — UI shows '(simulation)' next to the name.
-        When connected, uses the live object; when disconnected, uses simulation config
-        (e.g. simulate_except_measurement: real PRM, Gentec, Thorlabs only).
-        """
-        k = (key or "").strip()
-        if k == "Arroyo":
-            o = getattr(self._worker, "_arroyo", None)
-            if o is not None and getattr(o, "is_connected", lambda: False)():
-                return bool(getattr(o, "is_simulation", False))
-            return simulate_arroyo_enabled()
-        if k == "Actuator":
-            o = getattr(self._actuator_worker, "_actuator", None)
-            if o is not None and getattr(o, "is_connected", lambda: False)():
-                return bool(getattr(o, "is_simulation", False))
-            return simulate_actuator_enabled()
-        if k == "Ando":
-            o = getattr(self._ando_worker, "_ando", None)
-            if o is not None and getattr(o, "is_connected", lambda: False)():
-                return bool(getattr(o, "is_simulation", False))
-            return simulate_ando_enabled()
-        if k == "Wavemeter":
-            o = getattr(self._wavemeter_worker, "_wavemeter", None)
-            if o is not None and getattr(o, "is_connected", lambda: False)():
-                return bool(getattr(o, "is_simulation", False))
-            return simulate_wavemeter_enabled()
-        if k == "PRM":
-            c = getattr(self, "_prm_connection", None)
-            if c is not None and getattr(c, "is_connected", lambda: False)():
-                return bool(getattr(c, "is_simulation", False))
-            return simulate_prm_enabled()
-        if k == "Gentec":
-            o = getattr(self._gentec_worker, "_gentec", None)
-            if o is not None and getattr(o, "is_connected", lambda: False)():
-                return bool(getattr(o, "is_simulation", False))
-            return simulate_gentec_enabled()
-        if k == "Thorlabs":
-            o = getattr(self._thorlabs_worker, "_thorlabs", None)
-            if o is not None and getattr(o, "is_connected", lambda: False)():
-                return bool(getattr(o, "is_simulation", False))
-            return simulate_thorlabs_enabled()
-        return False
 
     def scan_ports(self):
         """Fast, runs on main thread."""
@@ -681,11 +576,7 @@ class MainViewModel(QObject):
     def connect_prm(self, serial_number: str, reconnecting: bool = False):
         """Connect PRM when device is detected (user selects serial and clicks Connect). After connect, show Connected. If device is turned off or unplugged, UI updates to Disconnected. reconnecting=True: used after move/home subprocess; do not log connection messages to status (show once only)."""
         serial_number = (serial_number or "").strip()
-        sim_prm = simulate_prm_enabled()
-        if sim_prm:
-            if not serial_number or serial_number.lower().startswith("(no ") or "not found" in serial_number.lower():
-                serial_number = "SIM"
-        elif not serial_number or serial_number.lower().startswith("(no ") or "not found" in serial_number.lower():
+        if not serial_number or serial_number.lower().startswith("(no ") or "not found" in serial_number.lower():
             self._prm_connected = False
             self.connection_state_changed.emit(self.get_connection_state())
             return
@@ -705,10 +596,7 @@ class MainViewModel(QObject):
                 self.status_log_message.emit("[PRM] Connecting to serial: {}".format(serial_number))
             # Keep PRM status concise in GUI log (avoid duplicate "Connected" lines).
             status_callback = None
-            if sim_prm:
-                self._prm_connection = PRMSimulationConnection(serial_number)
-            else:
-                self._prm_connection = PRMConnection(serial_number)
+            self._prm_connection = PRMConnection(serial_number)
             self._prm_connection.connect(status_log=status_callback, verbose=False)
             self._prm_worker.set_prm(self._prm_connection)
             self._prm_connected = True
@@ -720,21 +608,17 @@ class MainViewModel(QObject):
             self._prm_position_timer.start()
             self._poll_prm_position()
             if not reconnecting:
-                _psim = bool(getattr(self._prm_connection, "is_simulation", False))
-                if _psim:
-                    self.status_log_message.emit("PRM: Connected (simulation)")
-                else:
-                    try:
-                        pos = self._prm_connection.get_position()
-                        self.status_log_message.emit(
-                            "PRM: Connected — Kinesis OK, serial {}, position {:.3f} °".format(
-                                serial_number, float(pos) if pos is not None else 0.0
-                            )
+                try:
+                    pos = self._prm_connection.get_position()
+                    self.status_log_message.emit(
+                        "PRM: Connected — Kinesis OK, serial {}, position {:.3f} °".format(
+                            serial_number, float(pos) if pos is not None else 0.0
                         )
-                    except Exception:
-                        self.status_log_message.emit(
-                            "PRM: Connected — Kinesis OK, serial {}".format(serial_number)
-                        )
+                    )
+                except Exception:
+                    self.status_log_message.emit(
+                        "PRM: Connected — Kinesis OK, serial {}".format(serial_number)
+                    )
         except Exception as e:
             self.status_log_message.emit("PRM: Connection failed ({})".format(e))
             self._prm_connection = None

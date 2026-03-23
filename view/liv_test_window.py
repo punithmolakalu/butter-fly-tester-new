@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QFrame,
     QPushButton,
+    QPlainTextEdit,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QShowEvent
@@ -151,6 +152,20 @@ class LivTestSequenceWindow(QMainWindow):
         live_form.addRow("Gentec (mW):", self._live_gentec_label)
         live_form.addRow("Thorlabs (mW):", self._live_thorlabs_label)
         left_layout.addWidget(live_group)
+
+        log_group = QGroupBox("Process log")
+        log_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; font-size: 12px; color: #e6e6e6; } "
+            "QPlainTextEdit { background-color: #1e1e1e; color: #c8c8c8; font-size: 11px; }"
+        )
+        log_layout = QVBoxLayout(log_group)
+        self._process_log = QPlainTextEdit()
+        self._process_log.setReadOnly(True)
+        self._process_log.setMinimumHeight(120)
+        self._process_log.setPlaceholderText("LIV step messages appear here…")
+        log_layout.addWidget(self._process_log)
+        left_layout.addWidget(log_group)
+
         left_layout.addStretch()
 
         scroll = QScrollArea()
@@ -295,6 +310,21 @@ class LivTestSequenceWindow(QMainWindow):
             set_dark_title_bar(int(self.winId()), True)
         except Exception:
             pass
+
+    def clear_process_log(self) -> None:
+        if hasattr(self, "_process_log"):
+            self._process_log.clear()
+
+    def append_process_log(self, text: str) -> None:
+        pl = getattr(self, "_process_log", None)
+        if pl is None:
+            return
+        t = (text or "").rstrip()
+        if not t:
+            return
+        pl.appendPlainText(t)
+        sb = pl.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def set_params(self, params: dict):
         """Set left-side recipe labels from LIV recipe params."""

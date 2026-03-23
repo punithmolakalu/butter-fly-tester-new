@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QFrame,
     QScrollArea,
+    QPlainTextEdit,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QShowEvent
@@ -105,6 +106,20 @@ class PerTestSequenceWindow(QMainWindow):
         self._status = QLabel("Running...")
         stop_layout.addWidget(self._status)
         left_layout.addWidget(stop_group)
+
+        log_group = QGroupBox("Process log")
+        log_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; font-size: 12px; color: #e6e6e6; } "
+            "QPlainTextEdit { background-color: #1e1e1e; color: #c8c8c8; font-size: 11px; }"
+        )
+        log_layout = QVBoxLayout(log_group)
+        self._process_log = QPlainTextEdit()
+        self._process_log.setReadOnly(True)
+        self._process_log.setMinimumHeight(120)
+        self._process_log.setPlaceholderText("PER step messages appear here…")
+        log_layout.addWidget(self._process_log)
+        left_layout.addWidget(log_group)
+
         left_layout.addStretch()
 
         scroll = QScrollArea()
@@ -205,4 +220,19 @@ class PerTestSequenceWindow(QMainWindow):
 
     def set_status(self, text: str):
         self._status.setText(text or "")
+
+    def clear_process_log(self) -> None:
+        if hasattr(self, "_process_log"):
+            self._process_log.clear()
+
+    def append_process_log(self, text: str) -> None:
+        pl = getattr(self, "_process_log", None)
+        if pl is None:
+            return
+        t = (text or "").rstrip()
+        if not t:
+            return
+        pl.appendPlainText(t)
+        sb = pl.verticalScrollBar()
+        sb.setValue(sb.maximum())
 

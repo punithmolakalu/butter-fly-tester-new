@@ -3,6 +3,16 @@ Read-only recipe view: same layout as New Recipe window (RecipeWindow).
 All fields non-editable; layout matches RecipeWindow (GENERAL, PER, LIV, SPECTRUM, Temperature Stability).
 Always shows full layout; values empty when no recipe loaded, filled when recipe loaded.
 """
+import json
+
+from operations.recipe_normalize import normalize_loaded_recipe
+from operations.recipe_ts_helpers import (
+    first_in_dict,
+    first_or_fallback,
+    resolve_temperature_stability_blocks,
+    wait_time_ms_for_display,
+)
+
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -18,8 +28,11 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QSpinBox,
     QAbstractSpinBox,
+    QPlainTextEdit,
+    QFrame,
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPalette, QColor
 
 # Match recipe_window exactly
 GROUP_SPACING = 10
@@ -39,6 +52,7 @@ RO_STYLE = """
     QCheckBox { color: #FFFFFF; font-size: 12px; }
     QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #333333; border-radius: 2px; background-color: transparent; }
     QCheckBox::indicator:checked { background-color: #2196F3; }
+    QPlainTextEdit { background-color: #1e1e1e; color: #e6e6e6; border: 1px solid #3a3a42; padding: 6px; font-size: 11px; }
 """
 
 
@@ -96,6 +110,21 @@ class RecipeReadonlyView(QWidget):
         self._build_spectrum_tab()
         self._build_temp_stability_tab()
         layout.addWidget(self._tab_widget)
+        self.setAutoFillBackground(True)
+        # Scroll area viewports default to light Base on Fusion — force dark so tab does not flash white while scrolling.
+        try:
+            pal = self.palette()
+            pal.setColor(QPalette.Window, QColor(30, 30, 35))
+            self.setPalette(pal)
+            for sa in self.findChildren(QScrollArea):
+                sa.setFrameShape(QFrame.NoFrame)
+                vp = sa.viewport()
+                vp.setAutoFillBackground(True)
+                vpal = QPalette()
+                vpal.setColor(QPalette.Window, QColor(30, 30, 35))
+                vp.setPalette(vpal)
+        except Exception:
+            pass
 
     def _w(self, key, widget):
         self._widgets[key] = widget
@@ -152,14 +181,28 @@ class RecipeReadonlyView(QWidget):
         scroll_area.setWidget(seq_frame)
         rcp_layout.addWidget(scroll_area)
         gl.addWidget(rcp)
+        pfc_box = QGroupBox("PASS_FAIL_CRITERIA (from recipe file)")
+        pfc_box.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        pfc_lo = QVBoxLayout(pfc_box)
+        pfc_lo.setContentsMargins(*GROUP_MARGINS)
+        pfc_txt = QPlainTextEdit()
+        pfc_txt.setReadOnly(True)
+        pfc_txt.setMinimumHeight(100)
+        pfc_txt.setMaximumHeight(220)
+        pfc_txt.setPlaceholderText("No PASS_FAIL_CRITERIA block in this recipe.")
+        self._w("gen.pass_fail_json", pfc_txt)
+        pfc_lo.addWidget(pfc_txt)
+        gl.addWidget(pfc_box)
         gl.addStretch()
         self._tab_widget.addTab(tab, "GENERAL")
 
     def _build_per_tab(self):
         tab = QWidget()
         tab.setStyleSheet(RO_STYLE)
-        hl = QHBoxLayout(tab)
-        hl.setContentsMargins(15, 15, 15, 15)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(15, 15, 15, 15)
+        outer.setSpacing(12)
+        hl = QHBoxLayout()
         hl.setSpacing(15)
         hl.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         center_widget = QWidget()
@@ -186,6 +229,18 @@ class RecipeReadonlyView(QWidget):
         center_layout.addWidget(act, 0)
         hl.addWidget(center_widget, 0)
         hl.addStretch(1)
+        outer.addLayout(hl)
+        extra = QGroupBox("Additional parameters (recipe)")
+        extra.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        exf = QFormLayout(extra)
+        exf.setSpacing(GROUP_SPACING)
+        exf.setContentsMargins(*GROUP_MARGINS)
+        exf.addRow("Steps / degree:", self._w("per.steps_per_deg", _ro_line()))
+        exf.addRow("Wait time (ms):", self._w("per.wait_ms", _ro_line()))
+        exf.addRow("Min PER (dB):", self._w("per.min_per_db", _ro_line()))
+        exf.addRow("Wavelength (nm):", self._w("per.wavelength_nm", _ro_line()))
+        outer.addWidget(extra)
+        outer.addStretch()
         self._tab_widget.addTab(tab, "PER")
 
     def _build_liv_tab(self):
@@ -492,11 +547,15 @@ class RecipeReadonlyView(QWidget):
         if w is None:
             return
         if isinstance(w, QCheckBox):
-            if isinstance(value, str):
+            if isinstance(value, bool):
+                w.setChecked(value)
+            elif isinstance(value, str):
                 v = value.strip().lower()
                 w.setChecked(v in ("1", "true", "yes", "on"))
             else:
                 w.setChecked(bool(value) if value not in (None, "") else False)
+        elif isinstance(w, QPlainTextEdit):
+            w.setPlainText(str(value) if value is not None else "")
         elif isinstance(w, QSpinBox):
             try:
                 w.setValue(int(value) if value not in (None, "") else 0)
@@ -511,6 +570,8 @@ class RecipeReadonlyView(QWidget):
                 w.setChecked(False)
             elif isinstance(w, QSpinBox):
                 w.setValue(0)
+            elif isinstance(w, QPlainTextEdit):
+                w.clear()
             else:
                 w.setText("")
         self._clear_seq_layout()
@@ -520,6 +581,11 @@ class RecipeReadonlyView(QWidget):
         if not data:
             self.clear()
             return
+        if isinstance(data, dict):
+            try:
+                normalize_loaded_recipe(data)
+            except Exception:
+                pass
         def get(d, *keys, default=""):
             for k in keys:
                 if isinstance(d, dict) and k in d:
@@ -531,25 +597,60 @@ class RecipeReadonlyView(QWidget):
             return get(data, *path) if isinstance(data, dict) else {}
 
         gen = section("GENERAL") or section("General") or {}
-        ops = data.get("OPERATIONS") or {}
+        ops = data.get("OPERATIONS") or data.get("operations") or {}
         liv = section("LIV") or get(ops, "LIV") or {}
         per = section("PER") or get(ops, "PER") or {}
         spec = section("SPECTRUM") or get(ops, "SPECTRUM") or {}
+        if not isinstance(liv, dict):
+            liv = {}
+        if not isinstance(per, dict):
+            per = {}
+        if not isinstance(spec, dict):
+            spec = {}
         wm = get(data, "spec", "WAVEMETER") or get(ops, "WAVEMETER") or get(data, "WAVEMETER") or {}
-        stab = get(ops, "STABILITY") or {}
-        stab1 = get(ops, "Temperature Stability 1") or {}
-        stab2 = get(ops, "Temperature Stability 2") or {}
+        if not isinstance(wm, dict):
+            wm = {}
+        stab1, stab2, stab = resolve_temperature_stability_blocks(data)
+        if not isinstance(stab1, dict):
+            stab1 = {}
+        if not isinstance(stab2, dict):
+            stab2 = {}
 
-        self._set("gen.recipe_name", data.get("Recipe_Name") or data.get("recipe_name") or "")
+        recipe_name = (
+            data.get("Recipe_Name")
+            or data.get("recipe_name")
+            or gen.get("RecipeName")
+            or gen.get("recipe_name")
+            or ""
+        )
+        self._set("gen.recipe_name", recipe_name)
         self._set("gen.comments", data.get("Description") or get(gen, "Comments") or "")
         seq = data.get("TEST_SEQUENCE") or gen.get("TestSequence") or []
         if not isinstance(seq, (list, tuple)):
             seq = [str(seq)] if seq else []
         self._set("gen.num_tests", str(len(seq)) if seq else get(gen, "NumTests"))
-        self._set("gen.fiber_coupled", str(data.get("FiberCoupled", gen.get("FiberCoupled", ""))))
-        self._set("gen.wavelength", str(data.get("Wavelength", gen.get("Wavelength", ""))))
+        fc = data.get("FiberCoupled")
+        if fc is None:
+            fc = gen.get("FiberCoupled")
+        if fc is None:
+            fc = False
+        self._set("gen.fiber_coupled", bool(fc))
+        wl_top = data.get("Wavelength")
+        if wl_top is None or wl_top == "":
+            wl_top = gen.get("Wavelength")
+        self._set("gen.wavelength", str(wl_top).strip() if wl_top not in (None, "") else "")
         wm_for_gen = get(data, "spec", "WAVEMETER") or get(ops, "WAVEMETER") or get(data, "WAVEMETER") or {}
-        self._set("gen.smsr", "Yes" if (isinstance(wm_for_gen, dict) and wm_for_gen.get("smsr")) else "No")
+        if not isinstance(wm_for_gen, dict):
+            wm_for_gen = {}
+        self._set("gen.smsr", "Yes" if wm_for_gen.get("smsr") else "No")
+        pfc_all = data.get("PASS_FAIL_CRITERIA") or data.get("PassFailCriteria") or {}
+        if isinstance(pfc_all, dict) and pfc_all:
+            try:
+                self._set("gen.pass_fail_json", json.dumps(pfc_all, indent=2, ensure_ascii=False))
+            except Exception:
+                self._set("gen.pass_fail_json", str(pfc_all))
+        else:
+            self._set("gen.pass_fail_json", "")
         self._clear_seq_layout()
         for i, name in enumerate(seq):
             row = QHBoxLayout()
@@ -569,6 +670,10 @@ class RecipeReadonlyView(QWidget):
         self._set("per.travel_dist", get(per, "TravelDistance") or get(per, "travel_distance"))
         self._set("per.act_speed", get(per, "ActuatorSpeed") or get(per, "actuator_speed"))
         self._set("per.act_dist", get(per, "ActuatorDistance") or get(per, "actuator_distance"))
+        self._set("per.steps_per_deg", get(per, "StepsPerDegree") or get(per, "steps_per_degree"))
+        self._set("per.wait_ms", get(per, "WaitTimeMs") or get(per, "wait_time_ms"))
+        self._set("per.min_per_db", get(per, "MinPER_dB") or get(per, "min_per_db"))
+        self._set("per.wavelength_nm", get(per, "Wavelength") or get(per, "wavelength_nm"))
 
         self._set("liv.min_curr", get(liv, "min_current_mA") or get(liv, "MINCurr"))
         self._set("liv.max_curr", get(liv, "max_current_mA") or get(liv, "MAXCurr"))
@@ -646,23 +751,112 @@ class RecipeReadonlyView(QWidget):
         self._set("wm.avg", get(wm, "averaging"))
         self._set("wm.smsr", "Yes" if wm.get("smsr") else "No")
 
-        self._set("ts1.min_temp", get(stab1, "MinTemp") or get(stab, "min_temp"))
-        self._set("ts1.max_temp", get(stab1, "MaxTemp") or get(stab, "max_temp"))
-        self._set("ts1.inc", get(stab1, "TempIncrement") or get(stab1, "INC") or get(stab, "inc"))
-        self._set("ts1.wait_time", get(stab1, "StabilizationTime_s") or get(stab, "wait_time"))
-        self._set("ts1.set_curr", get(stab1, "Current") or get(stab, "set_curr"))
-        self._set("ts1.init_temp", get(stab1, "InitTemp") or get(stab, "init_temp"))
-        self._set("ts1.span", get(stab1, "Span"))
-        self._set("ts1.sampling", get(stab1, "Sampling"))
-        self._set("ts1.offset1", get(stab1, "Offset1"))
-        self._set("ts1.offset2", get(stab1, "Offset2"))
-        self._set("ts2.min_temp", get(stab2, "MinTemp"))
-        self._set("ts2.max_temp", get(stab2, "MaxTemp"))
-        self._set("ts2.inc", get(stab2, "TempIncrement") or get(stab2, "INC"))
-        self._set("ts2.wait_time", get(stab2, "StabilizationTime_s"))
-        self._set("ts2.set_curr", get(stab2, "Current"))
-        self._set("ts2.init_temp", get(stab2, "InitTemp"))
-        self._set("ts2.span", get(stab2, "Span"))
-        self._set("ts2.sampling", get(stab2, "Sampling"))
-        self._set("ts2.offset1", get(stab2, "Offset1"))
-        self._set("ts2.offset2", get(stab2, "Offset2"))
+        def fill_ts_limits(prefix: str, block) -> None:
+            if not isinstance(block, dict):
+                return
+            lim = block.get("limits")
+            if not isinstance(lim, dict):
+                return
+            for param in ["FWHM", "SMSR", "Width1", "Width2", "WL", "Power"]:
+                pk = param.lower()
+                sub = lim.get(param) or lim.get(param.replace(" ", "")) or {}
+                if not isinstance(sub, dict):
+                    continue
+                self._set(prefix + "lim_" + pk + "_ll", sub.get("ll", ""))
+                self._set(prefix + "lim_" + pk + "_ul", sub.get("ul", ""))
+                en = sub.get("enable")
+                self._set(prefix + "lim_" + pk + "_en", en if en is not None else "")
+
+        self._set(
+            "ts1.min_temp",
+            first_or_fallback(stab1, ("MinTemp", "min_temp", "MINTemp", "min_temp_c"), stab, ("min_temp",)),
+        )
+        self._set(
+            "ts1.max_temp",
+            first_or_fallback(stab1, ("MaxTemp", "max_temp", "MAXTemp", "max_temp_c"), stab, ("max_temp",)),
+        )
+        self._set(
+            "ts1.inc",
+            first_or_fallback(
+                stab1,
+                ("TempIncrement", "INC", "inc", "TempIncrement_c", "increment_c"),
+                stab,
+                ("inc",),
+            ),
+        )
+        self._set("ts1.wait_time", wait_time_ms_for_display(stab1, stab))
+        self._set(
+            "ts1.set_curr",
+            first_or_fallback(
+                stab1,
+                ("Current", "current", "SetCurr", "set_curr", "laser_current_mA"),
+                stab,
+                ("current",),
+            ),
+        )
+        self._set(
+            "ts1.init_temp",
+            first_or_fallback(
+                stab1,
+                ("InitTemp", "Init_Temp", "InitialTemp", "initial_temp_c", "MinTemp"),
+                stab,
+                ("temperature",),
+            ),
+        )
+        self._set("ts1.span", first_in_dict(stab1, ("Span", "span_nm", "WideSpan_nm")))
+        self._set("ts1.sampling", first_in_dict(stab1, ("Sampling", "sampling_points", "sampling")))
+        self._set("ts1.offset1", first_in_dict(stab1, ("Offset1", "offset1")))
+        self._set("ts1.offset2", first_in_dict(stab1, ("Offset2", "offset2")))
+        self._set("ts2.min_temp", first_in_dict(stab2, ("MinTemp", "min_temp", "MINTemp")))
+        self._set("ts2.max_temp", first_in_dict(stab2, ("MaxTemp", "max_temp", "MAXTemp")))
+        self._set("ts2.inc", first_in_dict(stab2, ("TempIncrement", "INC", "inc", "TempIncrement_c")))
+        self._set("ts2.wait_time", wait_time_ms_for_display(stab2, stab))
+        self._set(
+            "ts2.set_curr",
+            first_in_dict(stab2, ("Current", "current", "SetCurr", "set_curr", "laser_current_mA")),
+        )
+        self._set("ts2.init_temp", first_in_dict(stab2, ("InitTemp", "Init_Temp", "InitialTemp", "initial_temp_c", "MinTemp")))
+        self._set("ts2.span", first_in_dict(stab2, ("Span", "span_nm", "WideSpan_nm")))
+        self._set("ts2.sampling", first_in_dict(stab2, ("Sampling", "sampling_points", "sampling")))
+        self._set("ts2.offset1", first_in_dict(stab2, ("Offset1", "offset1")))
+        self._set("ts2.offset2", first_in_dict(stab2, ("Offset2", "offset2")))
+        self._set(
+            "ts1.deg_stability",
+            first_in_dict(
+                stab1,
+                (
+                    "DegOfStability",
+                    "deg_stability",
+                    "Deg of Stability",
+                    "DegOfStability_c",
+                    "WavelengthTolerance_nm",
+                    "wavelength_tolerance_nm",
+                ),
+            ),
+        )
+        self._set(
+            "ts2.deg_stability",
+            first_in_dict(
+                stab2,
+                (
+                    "DegOfStability",
+                    "deg_stability",
+                    "Deg of Stability",
+                    "DegOfStability_c",
+                    "WavelengthTolerance_nm",
+                    "wavelength_tolerance_nm",
+                ),
+            ),
+        )
+        fill_ts_limits("ts1.", stab1)
+        fill_ts_limits("ts2.", stab2)
+
+        # LIV pass/fail grid: fill from OPERATIONS.LIV.limits when present (widget keys match _build_liv_tab).
+        liv_lim = liv.get("limits") if isinstance(liv, dict) and isinstance(liv.get("limits"), dict) else {}
+        for param in ["L @ Ir", "V @ Ir", "I @ Lr", "V @ Lr", "SE1", "IT", "PD @ Ir"]:
+            wkey = "liv.crit_" + param.replace(" ", "").replace("@", "") + "_"
+            sub = liv_lim.get(param) or liv_lim.get(param.replace(" ", "")) or {}
+            if isinstance(sub, dict):
+                self._set(wkey + "ll", sub.get("ll", sub.get("lower", "")))
+                self._set(wkey + "ul", sub.get("ul", sub.get("upper", "")))
+                self._set(wkey + "en", sub.get("enable", sub.get("en", "")))

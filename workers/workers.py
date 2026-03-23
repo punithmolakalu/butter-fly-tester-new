@@ -17,22 +17,6 @@ from instruments.connection import (
     ThorlabsPowermeterConnection,
     WavemeterConnection,
 )
-from instruments.instrument_simulations import (
-    ActuatorSimulationConnection,
-    AndoSimulationConnection,
-    ArroyoSimulationConnection,
-    GentecSimulationConnection,
-    ThorlabsPowermeterSimulationConnection,
-    WavemeterSimulationConnection,
-)
-from instruments.simulation_config import (
-    simulate_actuator_enabled,
-    simulate_ando_enabled,
-    simulate_arroyo_enabled,
-    simulate_gentec_enabled,
-    simulate_thorlabs_enabled,
-    simulate_wavemeter_enabled,
-)
 
 
 # ----- ArroyoWorker -----
@@ -69,9 +53,6 @@ class ArroyoWorker(QObject):
     @pyqtSlot(str)
     def do_connect(self, port: str):
         port = (port or "").strip()
-        use_sim = simulate_arroyo_enabled()
-        if not port and use_sim:
-            port = "SIM"
         if not port:
             self.connection_result.emit(False)
             self.connection_state_changed.emit({"Arroyo": False})
@@ -84,19 +65,12 @@ class ArroyoWorker(QObject):
                     pass
                 self._arroyo = None
             # Windows often needs a short delay after closing a COM handle before reopening the same port.
-            if not use_sim:
-                time.sleep(0.35)
-            if use_sim:
-                self._arroyo = ArroyoSimulationConnection(port=port)
-                ok = self._arroyo.connect()
-                tag = " (simulation)" if ok else ""
-            else:
-                self._arroyo = ArroyoConnection(port=port)
-                ok = self._arroyo.connect()
-                tag = ""
+            time.sleep(0.35)
+            self._arroyo = ArroyoConnection(port=port)
+            ok = self._arroyo.connect()
             self.connection_result.emit(ok)
             self.connection_state_changed.emit({"Arroyo": ok})
-            print("[Connection] Arroyo: {}{}".format("OK" if ok else "FAIL", tag))
+            print("[Connection] Arroyo: {}".format("OK" if ok else "FAIL"))
         except Exception as e:
             self._arroyo = None
             self.connection_result.emit(False)
@@ -299,9 +273,6 @@ class AndoWorker(QObject):
     @pyqtSlot(str)
     def do_connect(self, gpib_address: str):
         gpib_address = (gpib_address or "").strip()
-        use_sim = simulate_ando_enabled()
-        if not gpib_address and use_sim:
-            gpib_address = "SIM"
         if not gpib_address:
             self.connection_result.emit(False)
             self.connection_state_changed.emit({"Ando": False})
@@ -309,17 +280,11 @@ class AndoWorker(QObject):
         try:
             if self._ando and self._ando.is_connected():
                 self._ando.disconnect()
-            if use_sim:
-                self._ando = AndoSimulationConnection(address=gpib_address)
-                ok = self._ando.connect()
-                tag = " (simulation)" if ok else ""
-            else:
-                self._ando = AndoConnection(address=gpib_address)
-                ok = self._ando.connect()
-                tag = ""
+            self._ando = AndoConnection(address=gpib_address)
+            ok = self._ando.connect()
             self.connection_result.emit(ok)
             self.connection_state_changed.emit({"Ando": ok})
-            print("[Connection] Ando: {}{}".format("OK" if ok else "FAIL", tag))
+            print("[Connection] Ando: {}".format("OK" if ok else "FAIL"))
         except Exception as e:
             self._ando = None
             self.connection_result.emit(False)
@@ -590,9 +555,6 @@ class ActuatorWorker(QObject):
     @pyqtSlot(str)
     def do_connect(self, port: str):
         port = (port or "").strip()
-        use_sim = simulate_actuator_enabled()
-        if not port and use_sim:
-            port = "SIM"
         if not port:
             self.connection_result.emit(False)
             self.connection_state_changed.emit({"Actuator": False})
@@ -604,19 +566,12 @@ class ActuatorWorker(QObject):
                 except Exception:
                     pass
                 self._actuator = None
-            if not use_sim:
-                time.sleep(0.35)
-            if use_sim:
-                self._actuator = ActuatorSimulationConnection(port=port)
-                ok = self._actuator.connect()
-                tag = " (simulation)" if ok else ""
-            else:
-                self._actuator = ActuatorConnection(port=port)
-                ok = self._actuator.connect()
-                tag = ""
+            time.sleep(0.35)
+            self._actuator = ActuatorConnection(port=port)
+            ok = self._actuator.connect()
             self.connection_result.emit(ok)
             self.connection_state_changed.emit({"Actuator": ok})
-            print("[Connection] Actuator: {}{}".format("OK" if ok else "FAIL", tag))
+            print("[Connection] Actuator: {}".format("OK" if ok else "FAIL"))
             if ok:
                 self._accum_a_mm = 0.0
                 self._accum_b_mm = 0.0
@@ -929,29 +884,20 @@ class WavemeterWorker(QObject):
     @pyqtSlot(str)
     def do_connect(self, address: str):
         address = (address or "").strip()
-        use_sim = simulate_wavemeter_enabled()
-        if not address and use_sim:
-            address = "SIM"
         if not address:
             self.connection_state_changed.emit({"Wavemeter": False, "Wavemeter_error": "No address selected"})
             return
         try:
             if self._wavemeter and self._wavemeter.is_connected():
                 self._wavemeter.disconnect()
-            if use_sim:
-                self._wavemeter = WavemeterSimulationConnection(address=address)
-                ok, err = self._wavemeter.connect()
-                sim_tag = " (simulation)" if ok else ""
-            else:
-                self._wavemeter = WavemeterConnection(address=address)
-                ok, err = self._wavemeter.connect()
-                sim_tag = ""
+            self._wavemeter = WavemeterConnection(address=address)
+            ok, err = self._wavemeter.connect()
             self.connection_state_changed.emit({
                 "Wavemeter": ok,
                 "Wavemeter_error": None if ok else (err or "Connection failed"),
             })
             if ok:
-                print("[Connection] Wavemeter: OK{}".format(sim_tag))
+                print("[Connection] Wavemeter: OK")
             else:
                 print("[Connection] Wavemeter: FAIL ({})".format(err))
         except Exception as e:
@@ -1024,9 +970,6 @@ class GentecWorker(QObject):
     @pyqtSlot(str)
     def do_connect(self, port: str):
         port = (port or "").strip()
-        use_sim = simulate_gentec_enabled()
-        if not port and use_sim:
-            port = "SIM"
         if not port:
             self.connection_state_changed.emit({"Gentec": False})
             return
@@ -1037,18 +980,11 @@ class GentecWorker(QObject):
                 except Exception:
                     pass
                 self._gentec = None
-            if not use_sim:
-                time.sleep(0.35)
-            if use_sim:
-                self._gentec = GentecSimulationConnection(port=port)
-                ok = self._gentec.connect()
-                tag = " (simulation)" if ok else ""
-            else:
-                self._gentec = GentecConnection(port=port)
-                ok = self._gentec.connect()
-                tag = ""
+            time.sleep(0.35)
+            self._gentec = GentecConnection(port=port)
+            ok = self._gentec.connect()
             self.connection_state_changed.emit({"Gentec": ok})
-            print("[Connection] Gentec: {}{}".format("OK" if ok else "FAIL", tag))
+            print("[Connection] Gentec: {}".format("OK" if ok else "FAIL"))
         except Exception as e:
             self._gentec = None
             self.connection_state_changed.emit({"Gentec": False})
@@ -1101,32 +1037,22 @@ class ThorlabsPowermeterWorker(QObject):
     @pyqtSlot(str)
     def do_connect(self, resource_str: str):
         resource_str = (resource_str or "").strip()
-        use_sim = simulate_thorlabs_enabled()
-        if not resource_str and use_sim:
-            resource_str = "SIM::VISA"
         if not resource_str:
             self.connection_state_changed.emit({"Thorlabs": False})
             return
         try:
             if self._thorlabs and self._thorlabs.is_connected():
                 self._thorlabs.disconnect()
-            if use_sim:
-                self._thorlabs = ThorlabsPowermeterSimulationConnection(resource=resource_str)
-                ok = self._thorlabs.connect()
-                tag = " (simulation)" if ok else ""
-                err_payload = ""
-            else:
-                self._thorlabs = ThorlabsPowermeterConnection(resource=resource_str)
-                ok = self._thorlabs.connect()
-                tag = ""
-                err_payload = ""
-                if not ok and self._thorlabs is not None:
-                    err_payload = getattr(self._thorlabs, "last_connect_error", None) or ""
+            self._thorlabs = ThorlabsPowermeterConnection(resource=resource_str)
+            ok = self._thorlabs.connect()
+            err_payload = ""
+            if not ok and self._thorlabs is not None:
+                err_payload = getattr(self._thorlabs, "last_connect_error", None) or ""
             payload = {"Thorlabs": ok}
             if err_payload:
                 payload["Thorlabs_error"] = err_payload
             self.connection_state_changed.emit(payload)
-            print("[Connection] Thorlabs: {}{}".format("OK" if ok else "FAIL", tag))
+            print("[Connection] Thorlabs: {}".format("OK" if ok else "FAIL"))
             if not ok and err_payload:
                 print("[Connection] Thorlabs: {}".format(err_payload))
         except Exception as e:

@@ -201,8 +201,12 @@ class LIVMain(_LIVMainBase):
             sig.emit(*args)
 
     def _emit_status(self, executor: Any, message: str) -> None:
-        """Emit status to executor log and optional status_message signal."""
-        self._emit(executor, "log_message", message)
+        """Emit status to LIV floating window log (liv_log_message) and optional status_message signal."""
+        sig = getattr(executor, "liv_log_message", None)
+        if sig is not None and hasattr(sig, "emit"):
+            sig.emit(message)
+        else:
+            self._emit(executor, "log_message", message)
         if _QT_AVAILABLE and hasattr(self, "status_message"):
             self.status_message.emit(message)
 

@@ -66,7 +66,8 @@ PYQTGRAPH_AXIS_TEXT = "#d4d4d4"
 
 def main_stylesheet() -> str:
     return f"""
-    QMainWindow, QWidget {{ background-color: #1e1e23; }}
+    QMainWindow {{ background-color: #1e1e23; }}
+    /* Avoid QWidget {{ background }} — it matches QPushButton too and overrides btn_run/btn_stop colors. */
     QTabWidget::pane {{ border: 1px solid #3a3a42; background-color: #1e1e23; margin: 0; padding: 0; top: 0; }}
     /* Tabs: enough horizontal padding + min-width so labels are not clipped (e.g. "Plot", "Calculation"). */
     QTabBar::tab {{
@@ -101,6 +102,8 @@ def main_stylesheet() -> str:
     QPushButton#btn_stop:hover {{ background-color: {COLOR_RED_HOVER}; }}
     QPushButton#btn_clear {{ background-color: {COLOR_ORANGE}; color: white; }}
     QPushButton#btn_clear:hover {{ background-color: {COLOR_ORANGE_HOVER}; }}
+    QPushButton#btn_start_new {{ background-color: {COLOR_ORANGE}; color: white; font-weight: bold; }}
+    QPushButton#btn_start_new:hover {{ background-color: {COLOR_ORANGE_HOVER}; }}
     QPushButton#btn_align {{ background-color: {COLOR_ORANGE}; color: white; font-weight: bold; font-size: 14px; padding: 10px 24px; }}
     QPushButton#btn_align:hover {{ background-color: {COLOR_ORANGE_HOVER}; }}
     QPushButton#btn_primary {{ background-color: {COLOR_BLUE}; color: white; }}
@@ -116,6 +119,27 @@ def main_stylesheet() -> str:
     QMenu {{ background-color: #2d2d34; color: #e6e6e6; }}
     QMenu::item:selected {{ background-color: #3a3a42; }}
     """
+
+
+def qpushbutton_local_style(background: str, hover: str, *, bold: bool = True) -> str:
+    """Set on a QPushButton via setStyleSheet() so fill/hover survive parent QGroupBox styles (propagation can hide global QSS)."""
+    fw = "font-weight: bold;" if bold else ""
+    return (
+        f"QPushButton {{ background-color: {background}; color: white; {fw} border: 1px solid #3a3a42; padding: 6px 14px; }}"
+        f"QPushButton:hover {{ background-color: {hover}; }}"
+        f"QPushButton:pressed {{ background-color: {hover}; }}"
+        f"QPushButton:disabled {{ background-color: #25252c; color: #808080; }}"
+    )
+
+
+def qpushbutton_local_style_neutral() -> str:
+    """Grey default-style button (e.g. New Recipe in Start box)."""
+    return (
+        "QPushButton { background-color: #2d2d34; color: #e6e6e6; border: 1px solid #3a3a42; padding: 6px 14px; }"
+        "QPushButton:hover { background-color: #3a3a42; }"
+        "QPushButton:pressed { background-color: #25252c; }"
+        "QPushButton:disabled { background-color: #25252c; color: #808080; }"
+    )
 
 
 def set_dark_title_bar(hwnd: int, dark: bool = True) -> None:

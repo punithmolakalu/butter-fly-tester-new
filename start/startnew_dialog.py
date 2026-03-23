@@ -2,9 +2,10 @@
 Test Information dialog: opens when user clicks Start New.
 Operator name, serial no, part no, comments, recipe selection, wavelength, test sequence.
 When a recipe is loaded (Browse), wavelength and test sequence are filled from the recipe.
+Emits recipe_path_changed when a recipe file is successfully loaded so the main Recipe tab can mirror it.
 """
-import json
-import configparser
+import os
+
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -41,6 +42,8 @@ def _section_style():
 class TestInformationDialog(QDialog):
     """Dialog for test information: OP name, serial no, part no, comments, recipe, wavelength, test sequence."""
     clear_requested = pyqtSignal()
+    # Absolute path after a recipe file is successfully read (Browse, paste path, or initial fill).
+    recipe_path_changed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super(TestInformationDialog, self).__init__(parent)
@@ -96,6 +99,7 @@ class TestInformationDialog(QDialog):
         browse_btn.clicked.connect(self._on_browse_recipe)
         recipe_row.addWidget(browse_btn)
         recipe_layout.addLayout(recipe_row)
+        self.recipe_path_edit.editingFinished.connect(self._on_recipe_path_editing_finished)
         self.wavelength_edit = QLineEdit()
         self.wavelength_edit.setPlaceholderText("Auto from recipe or enter manually (nm)")
         recipe_layout.addWidget(QLabel("Wavelength (nm):"))
@@ -132,26 +136,24 @@ class TestInformationDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _load_recipe_file(self, path):
-        """Load recipe from .json / .ini and return a dict or None."""
-        path = (path or "").strip()
-        if not path:
-            return None
-        try:
-            if path.lower().endswith(".json"):
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            if path.lower().endswith(".ini") or path.lower().endswith(".rcp"):
-                cfg = configparser.ConfigParser()
-                cfg.read(path)
-                if not cfg.sections():
-                    return None
-                return {s: dict(cfg[s]) for s in cfg.sections()}
-        except Exception:
-            return None
-        return None
+        """Load recipe from .json / .rcp / .ini (shared loader with main window Recipe tab)."""
+        from operations.recipe_io import load_recipe_file
+
+        return load_recipe_file(path or "")
+
+    def _on_recipe_path_editing_finished(self):
+        """User pasted or typed a path — load if it is an existing file."""
+        path = (self.recipe_path_edit.text() or "").strip()
+        if path and os.path.isfile(path):
+            self._fill_from_recipe(path)
 
     def _fill_from_recipe(self, path):
         """Load recipe at path and fill wavelength and test sequence display."""
+        path = (path or "").strip()
+        if not path:
+            self.wavelength_edit.clear()
+            self.sequence_display.clear()
+            return
         data = self._load_recipe_file(path)
         if not data:
             self.wavelength_edit.clear()
@@ -165,6 +167,7 @@ class TestInformationDialog(QDialog):
             seq = [str(seq)] if seq else []
         lines = ["{}. {}".format(i + 1, name) for i, name in enumerate(seq)]
         self.sequence_display.setPlainText("\n".join(lines) if lines else "")
+        self.recipe_path_changed.emit(os.path.abspath(path))
 
     def _on_browse_recipe(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -200,7 +203,9 @@ class TestInformationDialog(QDialog):
         self.serial_no_edit.setText(serial_no or "")
         self.part_no_edit.setText(part_no or "")
         self.comments_edit.setText(comments or "")
+        self.recipe_path_edit.blockSignals(True)
         self.recipe_path_edit.setText(recipe_path or "")
+        self.recipe_path_edit.blockSignals(False)
         self.wavelength_edit.setText(wavelength or "")
         if (recipe_path or "").strip():
             self._fill_from_recipe((recipe_path or "").strip())

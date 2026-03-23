@@ -323,9 +323,26 @@ def spectrum_laser_params_from_recipe(recipe: Dict[str, Any]) -> Tuple[float, fl
     if temp <= 0:
         temp = 25.0
 
-    cur = _to_float(spec.get("Current"), 0) or _to_float(spec.get("current"), 0)
+    # Prefer SPECTRUM block; accept common save/load variants (GUI saves "current" lowercase).
+    cur = (
+        _to_float(spec.get("Current"), 0)
+        or _to_float(spec.get("current"), 0)
+        or _to_float(spec.get("laser_current_mA"), 0)
+        or _to_float(spec.get("LaserCurrent"), 0)
+    )
     if cur <= 0:
-        cur = _to_float(g.get("Current"), 0) or _to_float(g.get("current"), 0)
+        cur = (
+            _to_float(g.get("Current"), 0)
+            or _to_float(g.get("current"), 0)
+            or _to_float(g.get("SetCurr"), 0)
+            or _to_float(g.get("set_curr"), 0)
+            or _to_float(g.get("LaserCurrent"), 0)
+            or _to_float(recipe.get("Current"), 0)
+            or _to_float(recipe.get("current"), 0)
+        )
+    # Same order as PER: PER step often carries the drive current when SPECTRUM block is minimal.
+    if cur <= 0:
+        cur = _to_float(per.get("Current"), 0) or _to_float(per.get("current"), 0)
     if cur <= 0:
         cur = _to_float(liv.get("min_current_mA"), 0) or _to_float(liv.get("rated_current_mA"), 0)
 

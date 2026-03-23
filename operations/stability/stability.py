@@ -58,7 +58,7 @@ def _ando_query_smsr_db(ando: Any) -> Optional[float]:
         try:
             v = fn()
             if v is not None:
-                return float(v)
+                return _to_float(v)
         except Exception:
             pass
     qfn = getattr(ando, "query", None)
@@ -129,9 +129,40 @@ class TemperatureStabilityParameters:
         if inc <= 0:
             inc = 1.0
 
-        cur = gf(["Current", "SetCurr", "Set_Curr_mA", "laser_current_mA"], 0.0)
+        cur = gf(
+            [
+                "Current",
+                "current",
+                "SetCurr",
+                "set_curr",
+                "Set_Curr_mA",
+                "laser_current_mA",
+                "LaserCurrent",
+                "laser_current",
+            ],
+            0.0,
+        )
         if cur <= 0:
-            cur = _to_float(g.get("Current"), 0.0) or _to_float(spec.get("Current"), 0.0)
+            cur = (
+                _to_float(g.get("Current"), 0.0)
+                or _to_float(g.get("current"), 0.0)
+                or _to_float(g.get("SetCurr"), 0.0)
+                or _to_float(g.get("set_curr"), 0.0)
+                or _to_float(spec.get("Current"), 0.0)
+                or _to_float(spec.get("current"), 0.0)
+                or _to_float(spec.get("laser_current_mA"), 0.0)
+            )
+        if cur <= 0:
+            liv = op.get("LIV") or op.get("liv") or {}
+            per = op.get("PER") or op.get("per") or {}
+            cur = (
+                _to_float(liv.get("rated_current_mA"), 0.0)
+                or _to_float(liv.get("min_current_mA"), 0.0)
+                or _to_float(per.get("Current"), 0.0)
+                or _to_float(per.get("current"), 0.0)
+            )
+        if cur <= 0:
+            cur = _to_float(recipe.get("Current"), 0.0) or _to_float(recipe.get("current"), 0.0)
 
         stab_s = gf(["StabilizationTime_s", "stab_time_s"], 5.0)
         if "WaitTime_ms" in blk:
@@ -216,7 +247,6 @@ class TemperatureStabilityParameters:
             resolution_nm=float(res),
             sampling_points=smpl,
             ref_level_dbm=_to_float(blk.get("RefLevel") or spec.get("RefLevel"), -10.0),
-            auto_ref_level=bool(auto_ref),
             sensitivity=sens,
             analysis=analysis,
         )
@@ -339,7 +369,7 @@ def _wait_tec(
         rt = getattr(arroyo, "read_temp", None)
         if callable(rt):
             try:
-                last = float(rt())
+                last = _to_float(rt(), last)
             except Exception:
                 pass
         if abs(last - target_c) <= tolerance_c:
@@ -452,6 +482,10 @@ class TemperatureStabilityProcess:
         params = TemperatureStabilityParameters.from_recipe(recipe if isinstance(recipe, dict) else {}, step_name, plot_slot)
 
         def log(msg: str) -> None:
+            sig = getattr(executor, "stability_log_message", None)
+            if sig is not None and hasattr(sig, "emit"):
+                sig.emit(msg)
+                return
             sig = getattr(executor, "log_message", None)
             if sig is not None and hasattr(sig, "emit"):
                 sig.emit(msg)

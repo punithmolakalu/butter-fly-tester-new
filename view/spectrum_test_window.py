@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QFrame,
     QScrollArea,
+    QPlainTextEdit,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QShowEvent
@@ -26,6 +27,17 @@ except ImportError:
     pg = None
 
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar
+
+try:
+    from operations.spectrum.trace_plotting import (
+        pair_trace_floats,
+        spectrum_plot_x_range_nm,
+        spectrum_plot_y_range_dbm,
+    )
+except ImportError:
+    pair_trace_floats = None  # type: ignore[misc, assignment]
+    spectrum_plot_x_range_nm = None  # type: ignore[misc, assignment]
+    spectrum_plot_y_range_dbm = None  # type: ignore[misc, assignment]
 
 
 def _fmt(v, default="—"):
@@ -76,6 +88,8 @@ class SpectrumTestSequenceWindow(QMainWindow):
             ("span_nm", "Span (nm)"),
             ("resolution_nm", "Resolution (nm)"),
             ("sampling_points", "Sampling (pts)"),
+            ("ref_level_dbm", "Ref level (dBm)"),
+            ("level_scale_db_per_div", "Level scale (dB/div)"),
             ("temperature_c", "Temperature (°C)"),
             ("laser_current_mA", "Laser current (mA)"),
             ("sensitivity", "Sensitivity"),
@@ -120,6 +134,20 @@ class SpectrumTestSequenceWindow(QMainWindow):
         self._status.setStyleSheet("color: #b0bec5; font-size: 12px;")
         ctrl_layout.addWidget(self._status)
         left_layout.addWidget(ctrl_group)
+
+        log_group = QGroupBox("Process log")
+        log_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; font-size: 12px; color: #e6e6e6; } "
+            "QPlainTextEdit { background-color: #1e1e1e; color: #c8c8c8; font-size: 11px; }"
+        )
+        log_layout = QVBoxLayout(log_group)
+        self._process_log = QPlainTextEdit()
+        self._process_log.setReadOnly(True)
+        self._process_log.setMinimumHeight(120)
+        self._process_log.setPlaceholderText("Spectrum step messages appear here…")
+        log_layout.addWidget(self._process_log)
+        left_layout.addWidget(log_group)
+
         left_layout.addStretch()
 
         scroll = QScrollArea()
@@ -145,26 +173,27 @@ class SpectrumTestSequenceWindow(QMainWindow):
             pw.setBackground("w")
             p = pw.getPlotItem()
             p.getViewBox().setBackgroundColor((255, 255, 255))
-            p.showGrid(x=True, y=True, alpha=0.4)
-            p.setLabel("bottom", "Wavelength WDATA (nm)", color="#333333")
-            p.setLabel("left", "Level LDATA (dBm)", color="#333333")
-            axis_pen = pg.mkPen(color="#333333", width=1)
+            p.showGrid(x=True, y=True, alpha=0.35)
+            _ax = "#333333"
+            p.setLabel("bottom", "Wavelength WDATA (nm)", color=_ax)
+            p.setLabel("left", "Level LDATA (dBm)", color=_ax)
+            axis_pen = pg.mkPen(color=_ax, width=1)
             p.getAxis("left").setPen(axis_pen)
             p.getAxis("left").setTextPen(axis_pen)
             p.getAxis("bottom").setPen(axis_pen)
             p.getAxis("bottom").setTextPen(axis_pen)
             self._plot_widget = pw
-            self._curve = pw.plot(
-                [],
-                [],
-                pen=pg.mkPen("#00AA00", width=2),
-                symbol="o",
-                symbolSize=4,
-                symbolBrush="#00AA00",
-            )
+            self._curve = pw.plot([], [], pen=pg.mkPen("#000000", width=1.5), antialias=True)
             right_layout.addWidget(pw, 1)
 
-        self._footnote = QLabel("Updates after each sweep completes (first, then second).")
+        self._rcp_center_nm = None
+        self._rcp_span_nm = None
+        self._rcp_ref_dbm = None
+        self._rcp_ls = None
+
+        self._footnote = QLabel(
+            "Live trace: Arroyo/Ando/wavemeter per recipe → sweep 1 plot → 4 s → re-center to ANA? peak → sweep 2 plot → 4 s → main tab; window closes at end."
+        )
         self._footnote.setStyleSheet("color: #9e9e9e; font-size: 10px;")
         right_layout.addWidget(self._footnote)
         main_layout.addWidget(right_widget, 1)
@@ -185,6 +214,39 @@ class SpectrumTestSequenceWindow(QMainWindow):
             else:
                 lbl.setText(_fmt(v))
 
+        def _to_f(key: str):
+            v = params.get(key)
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except Exception:
+                return None
+
+        self._rcp_center_nm = _to_f("center_nm")
+        self._rcp_span_nm = _to_f("span_nm")
+        self._rcp_ref_dbm = _to_f("ref_level_dbm")
+        self._rcp_ls = _to_f("level_scale_db_per_div")
+        self._apply_axes_from_rcp()
+
+    def _apply_axes_from_rcp(self) -> None:
+        """X = CTR ± SPAN/2 (Ando RCP); Y = REFL top, LSCL × divisions down (log scale)."""
+        pw = getattr(self, "_plot_widget", None)
+        if pw is None or spectrum_plot_x_range_nm is None:
+            return
+        vb = pw.getPlotItem().getViewBox()
+        c = self._rcp_center_nm
+        s = self._rcp_span_nm
+        if c is not None and s is not None and float(s) > 0:
+            x0, x1 = spectrum_plot_x_range_nm(c, s)
+            vb.setXRange(x0, x1, padding=0.02)
+        r = self._rcp_ref_dbm
+        ls = self._rcp_ls
+        if spectrum_plot_y_range_dbm is not None and r is not None and ls is not None:
+            yr = spectrum_plot_y_range_dbm(r, ls)
+            if yr is not None:
+                vb.setYRange(yr[0], yr[1], padding=0.02)
+
     def set_wavemeter_reading(self, nm) -> None:
         """Live wavelength from wavemeter (nm); None shows —."""
         if nm is None:
@@ -196,22 +258,43 @@ class SpectrumTestSequenceWindow(QMainWindow):
             self._wm_value.setText(str(nm))
 
     def set_live_trace(self, wdata, ldata) -> None:
-        """Plot Ando WDATA vs LDATA (same instrument as sweep)."""
+        """Plot Ando WDATA vs LDATA (instrument readback; coerced to float for pyqtgraph)."""
         if self._curve is None:
             return
-        w = list(wdata or [])
-        l_ = list(ldata or [])
-        n = min(len(w), len(l_))
+        if pair_trace_floats is not None:
+            w, l_ = pair_trace_floats(wdata, ldata)
+        else:
+            w = list(wdata or [])
+            l_ = list(ldata or [])
+            n = min(len(w), len(l_))
+            w, l_ = w[:n], l_[:n]
+        n = len(w)
         if n:
-            self._curve.setData(w[:n], l_[:n])
+            self._curve.setData(w, l_)
             try:
                 pw = getattr(self, "_plot_widget", None)
                 if pw is not None:
-                    pw.getPlotItem().getViewBox().autoRange()
+                    vb = pw.getPlotItem().getViewBox()
+                    self._apply_axes_from_rcp()
+                    r = self._rcp_ref_dbm
+                    ls = self._rcp_ls
+                    y_from_rcp = (
+                        spectrum_plot_y_range_dbm is not None
+                        and r is not None
+                        and ls is not None
+                        and spectrum_plot_y_range_dbm(r, ls) is not None
+                    )
+                    if not y_from_rcp and l_:
+                        lo = min(l_)
+                        hi = max(l_)
+                        pad = max(0.5, (hi - lo) * 0.1)
+                        vb.setYRange(lo - pad, hi + pad, padding=0.02)
             except Exception:
                 pass
         else:
             self._curve.setData([], [])
+            if (wdata or ldata) and n == 0:
+                self._status.setText("Plot: no finite WDATA/LDATA pairs — check Ando trace read.")
 
     def clear_live_plot(self) -> None:
         if self._curve is not None:
@@ -219,6 +302,21 @@ class SpectrumTestSequenceWindow(QMainWindow):
 
     def set_status(self, text: str):
         self._status.setText(text or "")
+
+    def clear_process_log(self) -> None:
+        if hasattr(self, "_process_log"):
+            self._process_log.clear()
+
+    def append_process_log(self, text: str) -> None:
+        pl = getattr(self, "_process_log", None)
+        if pl is None:
+            return
+        t = (text or "").rstrip()
+        if not t:
+            return
+        pl.appendPlainText(t)
+        sb = pl.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def set_finished(self, passed: bool, detail: str = ""):
         self._stop_btn.setEnabled(False)

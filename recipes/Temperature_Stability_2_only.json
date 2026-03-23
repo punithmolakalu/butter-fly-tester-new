@@ -1,0 +1,38 @@
+{
+  "Recipe_Name": "Temperature Stability 2 only",
+  "Laser_Type": "DPSS",
+  "Wavelength": 1064,
+  "Description": "Runs only Temperature Stability 2 (higher temperature window).",
+  "FiberCoupled": true,
+  "GENERAL": {
+    "Wavelength": 1064,
+    "Temperature": 25,
+    "Current": 1350,
+    "LaserType": "DPSS",
+    "PartNumber": "",
+    "BatchNumber": "",
+    "FiberCoupled": true,
+    "TestSequence": ["Temperature Stability 2"]
+  },
+  "OPERATIONS": {
+    "SPECTRUM": {
+      "CenterWL": 1064,
+      "Span": 10,
+      "Resolution": 0.1,
+      "Sampling": 501,
+      "Sensitivity": "HIGH1",
+      "Analysis": "DFB-LD"
+    },
+    "Temperature Stability 2": {
+      "Current": 1350,
+      "MinTemp": 35,
+      "MaxTemp": 55,
+      "TempIncrement": 5,
+      "StabilizationTime_s": 30,
+      "MeasurementDuration_s": 60,
+      "WavelengthTolerance_nm": 1
+    }
+  },
+  "TEST_SEQUENCE": ["Temperature Stability 2"],
+  "PASS_FAIL_CRITERIA": {}
+}

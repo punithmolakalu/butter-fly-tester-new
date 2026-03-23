@@ -4,7 +4,6 @@ with bridge instruments and emits liv_process_window_requested, liv_pre_start_pr
 alignment_window_requested, liv_test_result, etc., so the main window's connections work.
 """
 from PyQt5.QtCore import pyqtSignal, QObject, QThread, QMetaObject, Qt
-import importlib.util
 import os
 import sys
 import threading
@@ -47,26 +46,10 @@ except ImportError:
         SpectrumProcess = None  # type: ignore
         SpectrumProcessParameters = None  # type: ignore
 
-def _load_temperature_stability_process():
-    """Load operator/stability/stability.py without importing the top-level name ``operator`` (stdlib conflict)."""
-    try:
-        here = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.normpath(os.path.join(here, "..", "operator", "stability", "stability.py"))
-        if not os.path.isfile(path):
-            return None
-        name = "bf_operator_stability_stability"
-        spec = importlib.util.spec_from_file_location(name, path)
-        if spec is None or spec.loader is None:
-            return None
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[name] = mod
-        spec.loader.exec_module(mod)
-        return getattr(mod, "TemperatureStabilityProcess", None)
-    except Exception:
-        return None
-
-
-TemperatureStabilityProcess = _load_temperature_stability_process()
+try:
+    from operations.stability.stability import TemperatureStabilityProcess
+except ImportError:
+    TemperatureStabilityProcess = None  # type: ignore[misc, assignment]
 
 
 def _temperature_stability_plot_slot(step_name: str) -> int:
@@ -83,11 +66,17 @@ def _is_temperature_stability_step_name(name: str) -> bool:
 
 class TestSequenceExecutor(QObject):
     log_message = pyqtSignal(str)
+    # Step-specific process logs (secondary-monitor windows only; not Main tab status log).
+    liv_log_message = pyqtSignal(str)
+    per_log_message = pyqtSignal(str)
+    spectrum_log_message = pyqtSignal(str)
+    stability_log_message = pyqtSignal(str)
     liv_test_result = pyqtSignal(object)
     per_test_result = pyqtSignal(object, object, object)  # result, angles, powers_mw
     spectrum_test_result = pyqtSignal(object)
     stability_test_result = pyqtSignal(object)
     stability_process_window_requested = pyqtSignal(dict)  # step_name, recipe — secondary-monitor window
+    stability_step_finished = pyqtSignal(object)  # final TemperatureStabilityProcessResult — main tab + close window
     test_window_requested = pyqtSignal(str, dict)
     liv_process_window_requested = pyqtSignal(dict)
     connect_fiber_before_liv_requested = pyqtSignal(str)
@@ -101,6 +90,7 @@ class TestSequenceExecutor(QObject):
     spectrum_process_window_requested = pyqtSignal(dict)  # RCP summary for secondary Spectrum window
     spectrum_live_trace = pyqtSignal(object, object)  # wdata, ldata (Ando trace; worker thread → UI)
     spectrum_wavemeter_reading = pyqtSignal(object)  # wavelength nm or None
+    spectrum_step_status = pyqtSignal(str)  # first/second sweep status for Spectrum window + log
     # Step name + list of reason strings for Main tab "Reason for Failure" (worker thread → UI).
     sequence_step_failed = pyqtSignal(str, object)
 
@@ -201,6 +191,8 @@ class TestSequenceExecutor(QObject):
 
         all_passed = True
         recipe = self._recipe if isinstance(self._recipe, dict) else {}
+        # If TEST_SEQUENCE lists TS1 then TS2, skip TS2 when TS1 fails.
+        prev_ts1_passed: Optional[bool] = None
 
         for test_name in self._test_sequence:
             if self._stop_requested:
@@ -210,33 +202,36 @@ class TestSequenceExecutor(QObject):
             name_upper = (test_name or "").strip().upper()
             if not name_upper:
                 continue
-            self.log_message.emit(f"Starting {test_name} test...")
-
             if name_upper == "LIV":
+                self.liv_log_message.emit("Starting LIV test…")
                 step_ok = self._run_liv(recipe)
                 if not step_ok:
                     all_passed = False
-                self.log_message.emit("LIV test completed.")
+                self.liv_log_message.emit("LIV test completed.")
             elif name_upper == "PER":
+                self.per_log_message.emit("Starting PER test…")
                 step_ok = self._run_per(recipe)
                 if not step_ok:
                     all_passed = False
-                self.log_message.emit("PER test completed.")
+                self.per_log_message.emit("PER test completed.")
             elif name_upper == "SPECTRUM":
+                self.spectrum_log_message.emit("Starting Spectrum test…")
                 step_ok = self._run_spectrum(recipe)
                 if not step_ok:
                     all_passed = False
-                self.log_message.emit("Spectrum test completed.")
+                self.spectrum_log_message.emit("Spectrum test completed.")
             elif name_upper == "STABILITY":
+                self.stability_log_message.emit("Starting Temperature Stability sequence…")
                 step_ok = self._run_temperature_stability_sequence(recipe)
                 if not step_ok:
                     all_passed = False
-                self.log_message.emit("Temperature Stability sequence completed.")
+                self.stability_log_message.emit("Temperature Stability sequence completed.")
             elif _is_temperature_stability_step_name(test_name):
+                self.stability_log_message.emit("Starting {}…".format(test_name.strip()))
                 step_ok = self._run_temperature_stability_step(recipe, test_name.strip())
                 if not step_ok:
                     all_passed = False
-                self.log_message.emit("{} completed.".format(test_name.strip()))
+                self.stability_log_message.emit("{} completed.".format(test_name.strip()))
             else:
                 self.log_message.emit(f"Test {test_name} not implemented.")
                 self._emit_step_failed(
@@ -284,7 +279,7 @@ class TestSequenceExecutor(QObject):
         try:
             params = LIVMainParameters.from_recipe(recipe_dict)
             if not isinstance(params, LIVMainParameters):
-                self.log_message.emit(
+                self.liv_log_message.emit(
                     f"LIV internal error: from_recipe returned {type(params).__name__}, expected LIVMainParameters."
                 )
                 self._emit_step_failed(
@@ -305,7 +300,7 @@ class TestSequenceExecutor(QObject):
             result = liv.run(params, executor=self, recipe=recipe_dict)
             return bool(result.passed)
         except Exception as e:
-            self.log_message.emit(f"LIV error: {e}")
+            self.liv_log_message.emit(f"LIV error: {e}")
             self._emit_step_failed("LIV", ["LIV error: {}".format(e)])
             return False
         finally:
@@ -356,11 +351,11 @@ class TestSequenceExecutor(QObject):
             QMetaObject.invokeMethod(mw, "pausePollingForLiv", Qt.BlockingQueuedConnection)
         try:
             ok_laser, err_laser = apply_arroyo_recipe_and_laser_on_for_per(
-                arroyo, recipe_dict, log=lambda m: self.log_message.emit(m)
+                arroyo, recipe_dict, log=lambda m: self.per_log_message.emit(m)
             )
             if not ok_laser:
                 msg = err_laser or "Arroyo laser setup failed."
-                self.log_message.emit("PER aborted: {}".format(msg))
+                self.per_log_message.emit("PER aborted: {}".format(msg))
                 self._emit_step_failed(
                     "PER",
                     [
@@ -373,7 +368,7 @@ class TestSequenceExecutor(QObject):
                 return False
 
             # Laser ON + recipe current/temp were applied above; PER sweep runs next (Thorlabs + PRM).
-            self.log_message.emit("PER: Laser is ON — starting PRM sweep and Thorlabs sampling.")
+            self.per_log_message.emit("PER: Laser is ON — starting PRM sweep and Thorlabs sampling.")
 
             params = PERProcessParameters.from_recipe(recipe_dict)
             self.per_process_window_requested.emit(
@@ -391,7 +386,7 @@ class TestSequenceExecutor(QObject):
                     "wavelength_nm": float(getattr(params, "wavelength_nm", 0.0) or 0.0),
                 }
             )
-            self.log_message.emit(
+            self.per_log_message.emit(
                 "PER: Arroyo + Thorlabs (VISA) + PRM (Kinesis); RCP laser conditions applied, laser ON."
             )
             per = PERProcess()
@@ -405,7 +400,7 @@ class TestSequenceExecutor(QObject):
             passed = bool(result.passed)
             return passed
         except Exception as e:
-            self.log_message.emit(f"PER error: {e}")
+            self.per_log_message.emit(f"PER error: {e}")
             self._emit_step_failed("PER", ["PER error: {}".format(e)])
             return False
         finally:
@@ -413,13 +408,13 @@ class TestSequenceExecutor(QObject):
             # Opt out: recipe OPERATIONS.PER.keep_laser_on_after / GENERAL.keep_laser_on_after_per, or BF_PER_KEEP_LASER_ON=1
             try:
                 if per_keep_laser_on_after_step(recipe_dict):
-                    self.log_message.emit(
+                    self.per_log_message.emit(
                         "PER: Arroyo laser left ON (keep_laser_on_after in recipe or BF_PER_KEEP_LASER_ON). "
                         "Turn laser off manually when finished."
                     )
                 else:
                     arroyo_laser_off(arroyo)
-                    self.log_message.emit(
+                    self.per_log_message.emit(
                         "PER: Arroyo laser output OFF (PER step ended — laser safety; safe to open enclosure)."
                     )
             except Exception:
@@ -463,27 +458,43 @@ class TestSequenceExecutor(QObject):
             )
             return False
 
+        self.spectrum_log_message.emit(
+            "Spectrum: Arroyo, Ando, and Wavemeter connected — opening Spectrum window on secondary display."
+        )
+
+        # Build params for the secondary Spectrum window. Must open + connect live-plot signals
+        # *before* spec.run() — otherwise spectrum_live_trace emits from the worker thread while
+        # spectrum_process_window_requested is still queued on the GUI thread (race: no plot).
+        params_dict: dict = {}
         if SpectrumProcessParameters is not None:
             try:
                 sp = SpectrumProcessParameters.from_recipe(recipe_dict)
-                self.spectrum_process_window_requested.emit(
-                    {
-                        "center_nm": sp.center_nm,
-                        "span_nm": sp.span_nm,
-                        "resolution_nm": sp.resolution_nm,
-                        "sampling_points": sp.sampling_points,
-                        "temperature_c": sp.temperature_c,
-                        "laser_current_mA": sp.laser_current_mA,
-                        "sensitivity": sp.sensitivity,
-                        "analysis": sp.analysis,
-                    }
-                )
+                params_dict = {
+                    "center_nm": sp.center_nm,
+                    "span_nm": sp.span_nm,
+                    "resolution_nm": sp.resolution_nm,
+                    "sampling_points": sp.sampling_points,
+                    "temperature_c": sp.temperature_c,
+                    "laser_current_mA": sp.laser_current_mA,
+                    "sensitivity": sp.sensitivity,
+                    "analysis": sp.analysis,
+                    "ref_level_dbm": sp.ref_level_dbm,
+                    "level_scale_db_per_div": sp.level_scale_db_per_div,
+                }
             except Exception:
-                self.spectrum_process_window_requested.emit({})
-        else:
-            self.spectrum_process_window_requested.emit({})
+                pass
+        self._spectrum_window_params_pending = params_dict
 
         mw = getattr(self, "main_window", None)
+        if mw is not None:
+            QMetaObject.invokeMethod(
+                mw,
+                "blocking_open_spectrum_test_window",
+                Qt.BlockingQueuedConnection,
+            )
+        else:
+            self.spectrum_process_window_requested.emit(params_dict)
+
         if mw is not None and hasattr(mw, "pausePollingForLiv"):
             QMetaObject.invokeMethod(mw, "pausePollingForLiv", Qt.BlockingQueuedConnection)
         try:
@@ -498,18 +509,18 @@ class TestSequenceExecutor(QObject):
                 self._emit_step_failed("SPECTRUM", list(result.fail_reasons))
             return bool(result.passed)
         except Exception as e:
-            self.log_message.emit(f"Spectrum error: {e}")
+            self.spectrum_log_message.emit(f"Spectrum error: {e}")
             self._emit_step_failed("SPECTRUM", ["Spectrum error: {}".format(e)])
             return False
         finally:
             try:
                 if spectrum_keep_laser_on_after_step(recipe_dict):
-                    self.log_message.emit(
+                    self.spectrum_log_message.emit(
                         "Spectrum: Arroyo laser left ON (keep_laser_on_after in recipe or BF_SPECTRUM_KEEP_LASER_ON)."
                     )
                 else:
                     arroyo_laser_off(arroyo)
-                    self.log_message.emit("Spectrum: Arroyo laser output OFF (step ended).")
+                    self.spectrum_log_message.emit("Spectrum: Arroyo laser output OFF (step ended).")
             except Exception:
                 pass
             if mw is not None and hasattr(mw, "resumePollingAfterLiv"):
@@ -561,9 +572,13 @@ class TestSequenceExecutor(QObject):
             )
             if result.fail_reasons:
                 self._emit_step_failed(step_name, list(result.fail_reasons))
+            try:
+                self.stability_step_finished.emit(result)
+            except Exception:
+                pass
             return bool(result.passed)
         except Exception as e:
-            self.log_message.emit("Temperature Stability error: {}".format(e))
+            self.stability_log_message.emit("Temperature Stability error: {}".format(e))
             self._emit_step_failed(step_name, ["Temperature Stability error: {}".format(e)])
             return False
         finally:

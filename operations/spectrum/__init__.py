@@ -5,5 +5,11 @@ from .spectrum_process import (
     SpectrumProcessParameters,
     SpectrumProcessResult,
 )
+from .trace_plotting import pair_trace_floats
 
-__all__ = ("SpectrumProcess", "SpectrumProcessParameters", "SpectrumProcessResult")
+__all__ = (
+    "SpectrumProcess",
+    "SpectrumProcessParameters",
+    "SpectrumProcessResult",
+    "pair_trace_floats",
+)

@@ -1,5 +1,5 @@
 """Main window: View only. Binds to ViewModel."""
-from typing import Any, List, Optional, cast
+from typing import Any, List, Optional, Tuple, cast
 import threading
 import time
 import os
@@ -28,9 +28,10 @@ from PyQt5.QtWidgets import (
     QDialog,
     QFileDialog,
     QScrollArea,
+    QStackedWidget,
 )
 from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal, pyqtSlot
-from PyQt5.QtGui import QShowEvent, QDoubleValidator, QResizeEvent, QCursor, QFocusEvent
+from PyQt5.QtGui import QPalette, QColor, QShowEvent, QDoubleValidator, QResizeEvent, QCursor, QFocusEvent
 
 # PyQt5 stubs omit many Qt namespace members; cast keeps strict checkers quiet.
 QtCompat: Any = cast(Any, Qt)
@@ -45,11 +46,19 @@ except ImportError:
 PG: Any = cast(Any, _pyqtgraph_mod)
 
 from view.dark_theme import (
+    COLOR_GREEN,
+    COLOR_GREEN_HOVER,
+    COLOR_ORANGE,
+    COLOR_ORANGE_HOVER,
+    COLOR_RED,
+    COLOR_RED_HOVER,
     PYQTGRAPH_AXIS_TEXT,
     PYQTGRAPH_PLOT_BACKGROUND,
     PYQTGRAPH_VIEWBOX_RGB,
     get_dark_palette,
     main_stylesheet,
+    qpushbutton_local_style,
+    qpushbutton_local_style_neutral,
     set_dark_title_bar,
     spinbox_arrow_styles,
 )
@@ -64,6 +73,15 @@ from view.spectrum_test_window import SpectrumTestSequenceWindow
 from view.temperature_stability_window import TemperatureStabilitySequenceWindow
 
 from instruments.actuator import ACTUATOR_DEFAULT_MANUAL_DISTANCE_MM
+
+try:
+    from operations.spectrum.trace_plotting import pair_trace_floats as _spectrum_pair_trace_floats
+    from operations.spectrum.trace_plotting import spectrum_plot_x_range_nm as _spectrum_plot_x_range_nm
+    from operations.spectrum.trace_plotting import spectrum_plot_y_range_dbm as _spectrum_plot_y_range_dbm
+except ImportError:
+    _spectrum_pair_trace_floats = None
+    _spectrum_plot_x_range_nm = None
+    _spectrum_plot_y_range_dbm = None
 
 
 def _log_scan_results(ports, gpib, prm_serials, visa_list, thorlabs_usb=None):
@@ -155,6 +173,16 @@ class MainWindow(QMainWindow):
             pass
 
         central = QWidget()
+        central.setObjectName("main_content")
+        central.setAutoFillBackground(True)
+        try:
+            central.setAttribute(QtCompat.WA_StyledBackground, True)
+        except Exception:
+            pass
+        pal = QPalette()
+        pal.setColor(QPalette.Window, QColor(30, 30, 35))
+        central.setPalette(pal)
+        central.setStyleSheet("background-color: #1e1e23;")
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(4, 0, 4, 4)  # no top space
@@ -163,16 +191,26 @@ class MainWindow(QMainWindow):
         self._initial_scan_bridge = _InitialConnectionScanBridge(self)
         self._initial_scan_bridge.done.connect(self._on_initial_connection_scan_done)
         self.tabs = _FullWidthTabWidget()
+        self.tabs.setStyleSheet("QTabWidget::pane { background-color: #1e1e23; }")
         self.tabs.addTab(self._make_main_tab(), "Main")
         self.tabs.addTab(self._make_manual_control_tab(), "Manual Control")
         self.tabs.addTab(self._make_recipe_tab(), "Recipe")
-        self.tabs.addTab(self._make_liv_graph_tab(), "LIV")
-        self.tabs.addTab(self._make_per_graph_tab(), "PER")
-        self.tabs.addTab(self._make_spectrum_graph_tab(), "Spectrum")
-        self.tabs.addTab(self._make_stability_graph_tab(), "Temperature Stability")
+        # Placeholders replaced in __init__ by _deferred_install_graph_tabs() before first show (avoids white flash).
+        self.tabs.addTab(self._make_graph_tab_placeholder(), "LIV")
+        self.tabs.addTab(self._make_graph_tab_placeholder(), "PER")
+        self.tabs.addTab(self._make_graph_tab_placeholder(), "Spectrum")
+        self.tabs.addTab(self._make_graph_tab_placeholder(), "Temperature Stability")
+        self._graph_tabs_installed = False
         self.tabs.addTab(self._make_summary_tab(), "Summary")
         self.tabs.addTab(self._make_placeholder_tab("Result"), "Result")
         self.tabs.addTab(self._make_connection_tab(), "Connection")
+        # Fusion + QTabWidget: internal stack can paint default light background before child styles apply.
+        _stack = self.tabs.findChild(QStackedWidget)
+        if _stack is not None:
+            _stack.setAutoFillBackground(True)
+            _sp = QPalette()
+            _sp.setColor(QPalette.Window, QColor(30, 30, 35))
+            _stack.setPalette(_sp)
         self._last_arroyo_readings: Optional[dict] = None  # re-apply when switching tabs so all tabs stay in sync
         self.tabs.currentChanged.connect(self._on_tabs_current_changed)
         _tb = self.tabs.tabBar()
@@ -218,10 +256,73 @@ class MainWindow(QMainWindow):
         self._arroyo_laser_on = False
         self._arroyo_tec_on = False
 
+        # Stubs until graph tabs load (update paths use getattr / None checks).
+        self._liv_calc_overlay_items = []
+        self.liv_plot = self.liv_power_curve = self.liv_voltage_curve = self.liv_pd_curve = None
+        self.liv_calc_plot = self.liv_calc_power_curve = self.liv_calc_voltage_curve = self.liv_calc_pd_curve = None
+        self.liv_calc_power_at_ir = self.liv_calc_current_at_pr = self.liv_calc_threshold = self.liv_calc_slope = None
+        self._liv_calc_plot_item = None
+        self.per_plot = self.per_power_curve = None
+        self.per_result_max_power = self.per_result_min_power = self.per_result_per = self.per_result_angle = None
+        self.spectrum_os_plot = self.spectrum_os_curve = None
+        self.spectrum_first_os_plot = self.spectrum_first_os_curve = None
+        self.stability_plot1 = self.stability_plot2 = None
+        self.stability_wl_curve1 = self.stability_wl_curve2 = None
+        self.stability_smsr_curve1 = self.stability_smsr_curve2 = None
+        self.stability_power_curve1 = self.stability_power_curve2 = None
+        self.stability_specwidth_curve1 = self.stability_specwidth_curve2 = None
+
+        # PyQtGraph tabs: built in _complete_heavy_startup() after first show (see main.py QTimer.singleShot).
+
         # One-click select full value for all spinboxes and value line edits; units (suffix) stay visible
         _app = QApplication.instance()
         if _app is not None:
             _app.installEventFilter(self)
+
+    def _make_graph_tab_placeholder(self) -> QWidget:
+        """Dark empty tab; replaced on next event-loop tick with real PyQtGraph content."""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addStretch()
+        w.setStyleSheet("background-color: #1e1e23;")
+        w.setMinimumHeight(120)
+        return w
+
+    def _complete_heavy_startup(self) -> None:
+        """After first window paint: PyQtGraph tabs, lazy Recipe read-only view, then connection setup (main.py schedules)."""
+        if getattr(self, "_heavy_startup_done", False):
+            return
+        self._heavy_startup_done = True
+        self._deferred_install_graph_tabs()
+        self._ensure_recipe_readonly_view()
+        # Was previously in Connection tab __init__ — moved here so the window/layout can paint first.
+        self._apply_saved_addresses_and_auto_connect()
+        # Next tick: auto-connect (non-blocking worker connects + deferred PRM; see _on_connect_all defer_prm_ms).
+        QTimer.singleShot(0, self._run_startup_auto_connect)
+
+    def _deferred_install_graph_tabs(self) -> None:
+        """Build LIV/PER/Spectrum/Stability; replaces placeholders after first show."""
+        if getattr(self, "_graph_tabs_installed", False):
+            return
+        self._graph_tabs_installed = True
+        builders = [
+            ("LIV", self._make_liv_graph_tab),
+            ("PER", self._make_per_graph_tab),
+            ("Spectrum", self._make_spectrum_graph_tab),
+            ("Temperature Stability", self._make_stability_graph_tab),
+        ]
+        self.tabs.blockSignals(True)
+        try:
+            cur = self.tabs.currentIndex()
+            for i, (title, factory) in enumerate(builders):
+                idx = 3 + i
+                self.tabs.removeTab(idx)
+                self.tabs.insertTab(idx, factory(), title)
+            if 0 <= cur < self.tabs.count():
+                self.tabs.setCurrentIndex(cur)
+        finally:
+            self.tabs.blockSignals(False)
 
     def eventFilter(self, obj, event):
         """On focus: select full value so one click selects complete number; unit/suffix unchanged."""
@@ -245,18 +346,17 @@ class MainWindow(QMainWindow):
         _tb_show = self.tabs.tabBar()
         if _tb_show is not None:
             _tb_show.setMinimumWidth(self.tabs.width())
-        # After first show: start instrument auto-connect (saved addresses) on next event-loop tick.
-        if getattr(self, "_pending_startup_auto_connect", None) is not None:
-            QTimer.singleShot(0, self._run_startup_auto_connect)
+        # If window was not opened via main.py (no _heavy_startup_scheduled_from_main), defer heavy work here.
+        if not getattr(self, "_heavy_startup_scheduled_from_main", False) and not getattr(self, "_heavy_startup_done", False):
+            QTimer.singleShot(0, self._complete_heavy_startup)
 
     def _run_startup_auto_connect(self) -> None:
-        """Run once after window is visible: Connect All from saved addresses."""
+        """Run after deferred startup: Connect All from saved addresses (PRM Kinesis connect delayed so GUI stays responsive)."""
         saved = getattr(self, "_pending_startup_auto_connect", None)
         self._pending_startup_auto_connect = None
         if not isinstance(saved, dict) or saved.get("auto_connect", "1") != "1":
             return
-        self.main_status_log.appendPlainText("Auto-connect: connecting instruments using saved addresses…")
-        self._on_connect_all(use_saved=saved, wavemeter_delay_ms=80)
+        self._on_connect_all(use_saved=saved, wavemeter_delay_ms=80, defer_prm_ms=350)
 
     def _build_menu_bar(self):
         menubar = self.menuBar()
@@ -375,7 +475,10 @@ class MainWindow(QMainWindow):
         self.main_status_log = QPlainTextEdit()
         self.main_status_log.setReadOnly(True)
         self.main_status_log.setPlaceholderText("Log messages will appear here.")
-        self.main_status_log.setMinimumHeight(120)
+        self.main_status_log.setMinimumHeight(72)
+        self.main_status_log.setStyleSheet(
+            "QPlainTextEdit { font-size: 11px; padding: 4px 6px; background-color: #25252c; color: #e6e6e6; border: 1px solid #3a3a42; }"
+        )
         status_inner.addWidget(self.main_status_log)
 
         # Left column: Laser + TEC + Status Log, free layout, tight spacing so TEC is right under Laser
@@ -396,19 +499,24 @@ class MainWindow(QMainWindow):
         start_inner.setSpacing(12)
         start_btn_min_h = 48
         self.main_start_new_btn = QPushButton("Start New")
+        self.main_start_new_btn.setObjectName("btn_start_new")
         self.main_start_new_btn.setMinimumHeight(start_btn_min_h)
+        self.main_start_new_btn.setStyleSheet(qpushbutton_local_style(COLOR_ORANGE, COLOR_ORANGE_HOVER))
         start_inner.addWidget(self.main_start_new_btn)
         self.main_new_recipe_btn = QPushButton("New Recipe")
         self.main_new_recipe_btn.setToolTip("Opens the Recipe window on the other monitor.")
         self.main_new_recipe_btn.setMinimumHeight(start_btn_min_h)
+        self.main_new_recipe_btn.setStyleSheet(qpushbutton_local_style_neutral())
         start_inner.addWidget(self.main_new_recipe_btn)
         self.main_run_btn = QPushButton("Run")
         self.main_run_btn.setObjectName("btn_run")
         self.main_run_btn.setMinimumHeight(start_btn_min_h)
+        self.main_run_btn.setStyleSheet(qpushbutton_local_style(COLOR_GREEN, COLOR_GREEN_HOVER))
         start_inner.addWidget(self.main_run_btn)
         self.main_stop_btn = QPushButton("Stop")
         self.main_stop_btn.setObjectName("btn_stop")
         self.main_stop_btn.setMinimumHeight(start_btn_min_h)
+        self.main_stop_btn.setStyleSheet(qpushbutton_local_style(COLOR_RED, COLOR_RED_HOVER))
         start_inner.addWidget(self.main_stop_btn)
         start_inner.addStretch()
         grid.addWidget(start_box, 0, 1)
@@ -482,9 +590,17 @@ class MainWindow(QMainWindow):
         pass_fail_col.addWidget(self.main_pass_fail_indicator, 0, QtCompat.AlignCenter)
         status_row.addLayout(pass_fail_col)
         col3_layout.addLayout(status_row)
-        # ALIGN button
+        # ALIGN button (orange — same role as theme QPushButton#btn_align; local sheet so color always wins)
         self.main_align_btn = QPushButton("ALIGN")
         self.main_align_btn.setObjectName("btn_align")
+        self.main_align_btn.setMinimumHeight(48)
+        self.main_align_btn.setStyleSheet(
+            f"QPushButton#btn_align {{ background-color: {COLOR_ORANGE}; color: white; font-weight: bold; "
+            f"font-size: 14px; padding: 10px 24px; border: 1px solid #3a3a42; }}"
+            f"QPushButton#btn_align:hover {{ background-color: {COLOR_ORANGE_HOVER}; }}"
+            f"QPushButton#btn_align:pressed {{ background-color: {COLOR_ORANGE_HOVER}; }}"
+            f"QPushButton#btn_align:disabled {{ background-color: #25252c; color: #808080; }}"
+        )
         col3_layout.addWidget(self.main_align_btn)
         # Time Elapsed
         time_elapsed_lbl = QLabel("Time Elapsed")
@@ -607,24 +723,25 @@ class MainWindow(QMainWindow):
 
         def _build_liv_plot_widget(include_voltage_pd: bool = True):
             pw = PG.PlotWidget()
-            pw.setBackground(PYQTGRAPH_PLOT_BACKGROUND)
+            pw.setBackground("w")
             p1 = cast(Any, pw.getPlotItem())
-            p1.getViewBox().setBackgroundColor(PYQTGRAPH_VIEWBOX_RGB)
-            p1.showGrid(x=True, y=True, alpha=0.5)
-            axis_pen = PG.mkPen(color=PYQTGRAPH_AXIS_TEXT, width=1)
-            p1.setLabel('bottom', 'Current mA', color=PYQTGRAPH_AXIS_TEXT)
-            p1.setLabel('left', 'Power (mW)', color=PYQTGRAPH_AXIS_TEXT)
+            p1.getViewBox().setBackgroundColor((255, 255, 255))
+            p1.showGrid(x=True, y=True, alpha=0.35)
+            tc = "#333333"
+            axis_pen = PG.mkPen(color=tc, width=1)
+            p1.setLabel('bottom', 'Current mA', color=tc)
+            p1.setLabel('left', 'Power (mW)', color=tc)
             p1.layout.setColumnMinimumWidth(0, 70)
             left_axis = p1.getAxis('left')
             left_axis.setPen(axis_pen)
             left_axis.setTextPen(axis_pen)
             p1.getAxis('bottom').setPen(axis_pen)
             p1.getAxis('bottom').setTextPen(axis_pen)
-            legend = p1.addLegend(offset=(10, 10), labelTextColor=PYQTGRAPH_AXIS_TEXT)
+            legend = p1.addLegend(offset=(10, 10), labelTextColor=tc)
             legend.setParentItem(p1.vb)
             legend.anchor((1, 1), (1, 1))
-            power_curve = pw.plot([], [], pen=PG.mkPen('#FF0000', width=2), name='Power',
-                symbol='d', symbolSize=6, symbolBrush='#FF0000', symbolPen=PG.mkPen('#FF0000'))
+            power_curve = pw.plot([], [], pen=PG.mkPen('#000000', width=2), name='Power',
+                symbol='d', symbolSize=6, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'))
             voltage_curve = None
             pd_curve = None
             if include_voltage_pd:
@@ -637,11 +754,11 @@ class MainWindow(QMainWindow):
                 p1.getAxis('right').linkToView(p2)
                 p2.setXLink(p1.vb)
                 p2.setZValue(10)
-                p1.getAxis('right').setLabel('Voltage(v)', color=PYQTGRAPH_AXIS_TEXT)
+                p1.getAxis('right').setLabel('Voltage(v)', color=tc)
                 p1.getAxis('right').setPen(axis_pen)
                 p1.getAxis('right').setTextPen(axis_pen)
-                voltage_curve = PG.PlotDataItem([], [], pen=PG.mkPen('#0066FF', width=2), name='Voltage',
-                    symbol='s', symbolSize=5, symbolBrush='#0066FF', symbolPen=PG.mkPen('#0066FF'))
+                voltage_curve = PG.PlotDataItem([], [], pen=PG.mkPen('#000000', width=2, style=QtCompat.DashLine), name='Voltage',
+                    symbol='s', symbolSize=5, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'))
                 p2.addItem(voltage_curve)
                 legend.addItem(voltage_curve, 'Voltage')
                 p3 = PG.ViewBox()
@@ -652,10 +769,10 @@ class MainWindow(QMainWindow):
                 ax3.linkToView(p3)
                 p3.setXLink(p1.vb)
                 p3.setZValue(10)
-                ax3.setLabel('PD current (MDI)', color=PYQTGRAPH_AXIS_TEXT)
+                ax3.setLabel('PD current (MDI)', color=tc)
                 ax3.setPen(axis_pen)
                 ax3.setTextPen(axis_pen)
-                pd_curve = PG.PlotDataItem([], [], pen=PG.mkPen('#000000', width=2), name='PD (MDI)',
+                pd_curve = PG.PlotDataItem([], [], pen=PG.mkPen('#000000', width=2, style=QtCompat.DotLine), name='PD (MDI)',
                     symbol='t', symbolSize=5, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'))
                 p3.addItem(pd_curve)
                 legend.addItem(pd_curve, 'PD (MDI)')
@@ -707,8 +824,8 @@ class MainWindow(QMainWindow):
         self.liv_calc_plot, self._liv_calc_plot_item, self.liv_calc_power_curve, self.liv_calc_voltage_curve, self.liv_calc_pd_curve = _build_liv_plot_widget(include_voltage_pd=False)
         self._liv_calc_overlay_items = []
         calc_hint = QLabel(
-            "Legend: red=Power | green dashed=Threshold (Ith) | orange dashed=Rated Current (Ir) | "
-            "blue dashed=Rated Power (Pr) | magenta star=P@Ir | cyan diamond=I@Pr"
+            "Plot: solid black=Power | dashed black=Voltage | dotted black=PD. "
+            "Overlays: vertical dashed=Ith | vertical dotted=Ir | horizontal dash-dot=Pr | star=P@Ir | diamond=I@Pr (all black)."
         )
         calc_hint.setStyleSheet("color: #bbbbbb; font-size: 10px;")
         calc_hint.setWordWrap(True)
@@ -738,18 +855,19 @@ class MainWindow(QMainWindow):
         graph_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #e6e6e6;")
         graph_layout.addWidget(graph_label)
         pw = PG.PlotWidget()
-        pw.setBackground(PYQTGRAPH_PLOT_BACKGROUND)
-        cast(Any, pw.getPlotItem()).getViewBox().setBackgroundColor(PYQTGRAPH_VIEWBOX_RGB)
-        pw.showGrid(x=True, y=True, alpha=0.5)
-        axis_pen = PG.mkPen(color=PYQTGRAPH_AXIS_TEXT, width=1)
-        pw.setLabel('left', 'Power (mW)', color=PYQTGRAPH_AXIS_TEXT)
-        pw.setLabel('bottom', 'PRM angle (°)', color=PYQTGRAPH_AXIS_TEXT)
+        pw.setBackground("w")
+        cast(Any, pw.getPlotItem()).getViewBox().setBackgroundColor((255, 255, 255))
+        pw.showGrid(x=True, y=True, alpha=0.35)
+        tc = "#333333"
+        axis_pen = PG.mkPen(color=tc, width=1)
+        pw.setLabel('left', 'Power (mW)', color=tc)
+        pw.setLabel('bottom', 'PRM angle (°)', color=tc)
         pi_per = cast(Any, pw.getPlotItem())
         pi_per.getAxis('left').setPen(axis_pen)
         pi_per.getAxis('left').setTextPen(axis_pen)
         pi_per.getAxis('bottom').setPen(axis_pen)
         pi_per.getAxis('bottom').setTextPen(axis_pen)
-        self.per_power_curve = pw.plot([], [], pen=PG.mkPen('#00AA00', width=2), symbol='o', symbolSize=6, symbolBrush='#00AA00')
+        self.per_power_curve = pw.plot([], [], pen=PG.mkPen('#000000', width=2), symbol='o', symbolSize=6, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'))
         self.per_plot = pw
         graph_layout.addWidget(pw, 1)
         main_layout.addWidget(graph_widget, 1)
@@ -773,7 +891,7 @@ class MainWindow(QMainWindow):
         return w
 
     def _make_spectrum_graph_tab(self):
-        """Spectrum tab: one OSA plot (Ando WDATA vs LDATA). Starts empty; updates when the Spectrum test step finishes."""
+        """Spectrum tab: inner tabs for second sweep (primary) and first sweep; white plot area, black trace."""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -782,46 +900,71 @@ class MainWindow(QMainWindow):
             layout.addWidget(QLabel("pyqtgraph required for graphs."))
             self.spectrum_os_plot = None
             self.spectrum_os_curve = None
+            self.spectrum_first_os_plot = None
+            self.spectrum_first_os_curve = None
             return w
 
-        title_lbl = QLabel("Spectrum — second sweep only (Ando LDATA vs wavelength)")
+        title_lbl = QLabel("Spectrum — Ando LDATA vs wavelength (second tab: primary; first tab: first sweep only)")
         title_lbl.setStyleSheet("font-weight: bold; color: #e6e6e6; font-size: 13px;")
         layout.addWidget(title_lbl)
         hint = QLabel(
-            "Starts empty. After the Spectrum step, shows only the second Ando sweep. "
-            "Y = Ando level (dBm). X is shifted so the trace peak aligns to the wavemeter reading (same curve shape)."
+            "Starts empty. After the Spectrum step: Second sweep tab prefers the second Ando sweep (else first). "
+            "First sweep tab always shows the first sweep trace. Pass/fail limits apply only when enable_limits is set in the recipe. "
+            "Y = Ando level (dBm). X is shifted so the trace peak aligns to the wavemeter reading."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #9e9e9e; font-size: 11px;")
         layout.addWidget(hint)
 
-        # Match LIV/PER/Stability: dark plot area, light axes, primary trace same as PER (green).
-        self._spectrum_axis_text_color = PYQTGRAPH_AXIS_TEXT
-        axis_pen = PG.mkPen(color=PYQTGRAPH_AXIS_TEXT, width=1)
-
-        pw = PG.PlotWidget()
-        pw.setBackground(PYQTGRAPH_PLOT_BACKGROUND)
-        pi = cast(Any, pw.getPlotItem())
-        pi.getViewBox().setBackgroundColor(PYQTGRAPH_VIEWBOX_RGB)
-        pi.setTitle("Ando sweep — LVL (dBm)", color=self._spectrum_axis_text_color)
-        pi.showGrid(x=True, y=True, alpha=0.5)
+        # White plot area + dark axis text; black trace (matches Spectrum secondary window).
+        self._spectrum_axis_text_color = "#333333"
+        tc = self._spectrum_axis_text_color
+        axis_pen = PG.mkPen(color=tc, width=1)
         self._spectrum_axis_bottom_default = "Wavelength (nm) — peak aligned to wavemeter"
         self._spectrum_axis_left_default = "Level (dBm)"
-        pi.setLabel("bottom", self._spectrum_axis_bottom_default, color=self._spectrum_axis_text_color)
-        pi.setLabel("left", self._spectrum_axis_left_default, color=self._spectrum_axis_text_color)
-        for axn in ("left", "bottom"):
-            pi.getAxis(axn).setPen(axis_pen)
-            pi.getAxis(axn).setTextPen(axis_pen)
-        self.spectrum_os_curve = pw.plot(
-            [],
-            [],
-            pen=PG.mkPen("#00AA00", width=2),
-            symbol="o",
-            symbolSize=6,
-            symbolBrush="#00AA00",
-        )
-        self.spectrum_os_plot = pw
-        layout.addWidget(pw, 1)
+
+        def _mk_spectrum_pg(initial_title: str) -> Tuple[Any, Any]:
+            pw = PG.PlotWidget()
+            pw.setBackground("w")
+            pi = cast(Any, pw.getPlotItem())
+            pi.getViewBox().setBackgroundColor((255, 255, 255))
+            pi.setTitle(initial_title, color=tc)
+            pi.showGrid(x=True, y=True, alpha=0.35)
+            pi.setLabel("bottom", self._spectrum_axis_bottom_default, color=tc)
+            pi.setLabel("left", self._spectrum_axis_left_default, color=tc)
+            for axn in ("left", "bottom"):
+                pi.getAxis(axn).setPen(axis_pen)
+                pi.getAxis(axn).setTextPen(axis_pen)
+            # Line only (no per-point markers) — hundreds of OSA samples look like stems/noise with symbols on.
+            curve = pw.plot([], [], pen=PG.mkPen("#000000", width=1.5), antialias=True)
+            return pw, curve
+
+        inner = QTabWidget()
+        inner.setObjectName("spectrumInnerTabs")
+        inner.setDocumentMode(True)
+        _sp_bar = inner.tabBar()
+        if _sp_bar is not None:
+            _sp_bar.setElideMode(Qt.ElideNone)  # type: ignore[attr-defined]
+
+        tab_second = QWidget()
+        lay_second = QVBoxLayout(tab_second)
+        lay_second.setContentsMargins(0, 0, 0, 0)
+        pw2, c2 = _mk_spectrum_pg("Ando sweep — LVL (dBm)")
+        lay_second.addWidget(pw2, 1)
+        self.spectrum_os_plot = pw2
+        self.spectrum_os_curve = c2
+        inner.addTab(tab_second, "Second sweep")
+
+        tab_first = QWidget()
+        lay_first = QVBoxLayout(tab_first)
+        lay_first.setContentsMargins(0, 0, 0, 0)
+        pw1, c1 = _mk_spectrum_pg("First sweep — LVL (dBm)")
+        lay_first.addWidget(pw1, 1)
+        self.spectrum_first_os_plot = pw1
+        self.spectrum_first_os_curve = c1
+        inner.addTab(tab_first, "First sweep")
+
+        layout.addWidget(inner, 1)
 
         sum_style = (
             "QGroupBox { font-weight: bold; font-size: 12px; color: #e6e6e6; } "
@@ -864,38 +1007,39 @@ class MainWindow(QMainWindow):
             self.stability_plot1 = self.stability_plot2 = None
             self._stability_curves_1 = self._stability_curves_2 = None
             return w
-        axis_pen = PG.mkPen(color=PYQTGRAPH_AXIS_TEXT, width=1)
+        axis_tc = "#333333"
+        axis_pen = PG.mkPen(color=axis_tc, width=1)
         row = QHBoxLayout()
 
         def make_stability_plot(title_text):
             pw = PG.PlotWidget()
-            pw.setBackground(PYQTGRAPH_PLOT_BACKGROUND)
+            pw.setBackground("w")
             pi = cast(Any, pw.getPlotItem())
-            pi.setTitle(title_text)
-            pi.getViewBox().setBackgroundColor(PYQTGRAPH_VIEWBOX_RGB)
-            pi.showGrid(x=True, y=True, alpha=0.5)
-            pi.setLabel('bottom', 'Temp(°C)', color=PYQTGRAPH_AXIS_TEXT)
-            pi.setLabel('left', 'Wavelength (nm)', color=PYQTGRAPH_AXIS_TEXT)
+            pi.setTitle(title_text, color=axis_tc)
+            pi.getViewBox().setBackgroundColor((255, 255, 255))
+            pi.showGrid(x=True, y=True, alpha=0.35)
+            pi.setLabel('bottom', 'Temp(°C)', color=axis_tc)
+            pi.setLabel('left', 'Wavelength (nm)', color=axis_tc)
             pi.getAxis('left').setPen(axis_pen)
             pi.getAxis('left').setTextPen(axis_pen)
             pi.getAxis('bottom').setPen(axis_pen)
             pi.getAxis('bottom').setTextPen(axis_pen)
             pi.layout.setColumnMinimumWidth(0, 72)
-            # Left Y: PeakWL (blue)
-            curve_wl = pw.plot([], [], pen=PG.mkPen('#0066CC', width=2), symbol='o', symbolSize=5, symbolBrush='#0066CC', name='PeakWL')
-            # Right Y1: SMSR
+            # Left Y: PeakWL — solid black
+            curve_wl = pw.plot([], [], pen=PG.mkPen('#000000', width=2), symbol='o', symbolSize=5, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'), name='PeakWL')
+            # Right Y1: SMSR — dashed black
             pi.showAxis('right')
             vb_smsr = PG.ViewBox()
             pi.scene().addItem(vb_smsr)
             pi.getAxis('right').linkToView(vb_smsr)
             vb_smsr.setXLink(pi.vb)
-            pi.getAxis('right').setLabel('SMSR', color=PYQTGRAPH_AXIS_TEXT)
+            pi.getAxis('right').setLabel('SMSR', color=axis_tc)
             pi.getAxis('right').setPen(axis_pen)
             pi.getAxis('right').setTextPen(axis_pen)
             pi.layout.setColumnMinimumWidth(2, 48)
-            curve_smsr = PG.PlotDataItem([], [], pen=PG.mkPen('#bdbdbd', width=2), symbol='o', symbolSize=5, symbolBrush='#bdbdbd', name='SMSR')
+            curve_smsr = PG.PlotDataItem([], [], pen=PG.mkPen('#000000', width=2, style=QtCompat.DashLine), symbol='o', symbolSize=5, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'), name='SMSR')
             vb_smsr.addItem(curve_smsr)
-            # Right Y2: Power(mW)
+            # Right Y2: Power(mW) — dotted black
             ax_power = PG.AxisItem('right')
             pi.layout.addItem(ax_power, 2, 3)
             pi.layout.setColumnMinimumWidth(3, 58)
@@ -903,12 +1047,12 @@ class MainWindow(QMainWindow):
             pi.scene().addItem(vb_power)
             ax_power.linkToView(vb_power)
             vb_power.setXLink(pi.vb)
-            ax_power.setLabel('Power (mW)', color=PYQTGRAPH_AXIS_TEXT)
+            ax_power.setLabel('Power (mW)', color=axis_tc)
             ax_power.setPen(axis_pen)
             ax_power.setTextPen(axis_pen)
-            curve_power = PG.PlotDataItem([], [], pen=PG.mkPen('#008800', width=2), symbol='o', symbolSize=5, symbolBrush='#008800', name='Power')
+            curve_power = PG.PlotDataItem([], [], pen=PG.mkPen('#000000', width=2, style=QtCompat.DotLine), symbol='o', symbolSize=5, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'), name='Power')
             vb_power.addItem(curve_power)
-            # Right Y3: SpecWidth(nm)
+            # Right Y3: SpecWidth(nm) — dash-dot black
             ax_sw = PG.AxisItem('right')
             pi.layout.addItem(ax_sw, 2, 4)
             pi.layout.setColumnMinimumWidth(4, 72)
@@ -916,10 +1060,10 @@ class MainWindow(QMainWindow):
             pi.scene().addItem(vb_sw)
             ax_sw.linkToView(vb_sw)
             vb_sw.setXLink(pi.vb)
-            ax_sw.setLabel('SpecWidth (nm)', color=PYQTGRAPH_AXIS_TEXT)
+            ax_sw.setLabel('SpecWidth (nm)', color=axis_tc)
             ax_sw.setPen(axis_pen)
             ax_sw.setTextPen(axis_pen)
-            curve_sw = PG.PlotDataItem([], [], pen=PG.mkPen('#CC0000', width=2), symbol='o', symbolSize=5, symbolBrush='#CC0000', name='SpecWidth')
+            curve_sw = PG.PlotDataItem([], [], pen=PG.mkPen('#000000', width=2, style=QtCompat.DashDotLine), symbol='o', symbolSize=5, symbolBrush='#000000', symbolPen=PG.mkPen('#000000'), name='SpecWidth')
             vb_sw.addItem(curve_sw)
 
             def sync_vbs():
@@ -933,7 +1077,7 @@ class MainWindow(QMainWindow):
             sync_vbs()
             pi.vb.sigResized.connect(sync_vbs)
 
-            legend = pi.addLegend(offset=(10, 10), labelTextColor=PYQTGRAPH_AXIS_TEXT)
+            legend = pi.addLegend(offset=(10, 10), labelTextColor=axis_tc)
             legend.setParentItem(pi.vb)
             legend.anchor((1, 1), (1, 1))
             legend.addItem(curve_smsr, 'SMSR')
@@ -1020,6 +1164,9 @@ class MainWindow(QMainWindow):
         sc = getattr(self, "spectrum_os_curve", None)
         if sc is not None:
             sc.setData([], [])
+        scf = getattr(self, "spectrum_first_os_curve", None)
+        if scf is not None:
+            scf.setData([], [])
         for nm in (
             "spectrum_wavemeter_reading",
             "spectrum_peak_wl",
@@ -1176,8 +1323,11 @@ class MainWindow(QMainWindow):
         return w
 
     def _make_recipe_tab(self):
-        """Recipe tab: same layout as New Recipe window but read-only. Always shows full layout; empty when no recipe, filled when recipe selected."""
+        """Recipe tab: path row + lazy-loaded read-only view (large widget tree — not built in __init__ to avoid startup freeze / white flash)."""
         w = QWidget()
+        w.setObjectName("recipe_tab_container")
+        w.setAutoFillBackground(True)
+        w.setStyleSheet("background-color: #1e1e23;")
         vbox = QVBoxLayout(w)
         # Path + Browse row
         search_row = QHBoxLayout()
@@ -1191,13 +1341,46 @@ class MainWindow(QMainWindow):
         search_row.addWidget(browse_btn)
         search_row.addStretch()
         vbox.addLayout(search_row)
-        # Read-only view: same layout as New Recipe, always visible (empty or filled)
-        self._recipe_readonly_view = RecipeReadonlyView(self)
-        vbox.addWidget(self._recipe_readonly_view)
+        self._recipe_detail_host = QWidget()
+        self._recipe_detail_host.setStyleSheet("background-color: #1e1e23;")
+        self._recipe_detail_host.setAutoFillBackground(True)
+        self._recipe_detail_layout = QVBoxLayout(self._recipe_detail_host)
+        self._recipe_detail_layout.setContentsMargins(0, 0, 0, 0)
+        self._recipe_loading_label = QLabel("Loading recipe layout…")
+        self._recipe_loading_label.setStyleSheet(
+            "color: #9e9e9e; font-size: 13px; padding: 12px; background-color: #1e1e23;"
+        )
+        self._recipe_loading_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._recipe_detail_layout.addWidget(self._recipe_loading_label)
+        self._recipe_readonly_view = None
+        vbox.addWidget(self._recipe_detail_host, 1)
         self._current_recipe_data = None
         self._current_recipe_path = None
         self._startnew_comments = ""
         return w
+
+    def _ensure_recipe_readonly_view(self) -> None:
+        """Create RecipeReadonlyView on first use (after first paint or when Recipe tab / data refresh needs it)."""
+        if getattr(self, "_recipe_readonly_view", None) is not None:
+            return
+        host = getattr(self, "_recipe_detail_host", None)
+        lay = getattr(self, "_recipe_detail_layout", None)
+        if host is None or lay is None:
+            return
+        self._recipe_readonly_view = RecipeReadonlyView(host)
+        self._recipe_readonly_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        lay.addWidget(self._recipe_readonly_view)
+        self._recipe_loading_label = None
+        data = getattr(self, "_current_recipe_data", None)
+        if data:
+            self._recipe_readonly_view.set_data(data)
+        else:
+            self._recipe_readonly_view.clear()
 
     def _on_recipe_tab_browse(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1217,22 +1400,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Recipe", "Could not load recipe: {}".format(e))
 
     def _load_recipe_file(self, path):
-        """Load recipe from .json / .ini and return a dict (or None)."""
-        import json
-        import configparser
-        path = (path or "").strip()
-        if not path:
-            return None
-        if path.lower().endswith(".json"):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        if path.lower().endswith(".ini") or path.lower().endswith(".rcp"):
-            cfg = configparser.ConfigParser()
-            cfg.read(path)
-            if not cfg.sections():
-                return None
-            return {s: dict(cfg[s]) for s in cfg.sections()}
-        return None
+        """Load recipe from .json / .rcp (JSON or INI) / .ini — same as Recipe editor and Start New."""
+        from operations.recipe_io import load_recipe_file
+
+        return load_recipe_file(path or "")
 
     def _refresh_recipe_tab(self):
         """Update path display and fill or clear the read-only recipe view (same layout always visible)."""
@@ -1240,6 +1411,7 @@ class MainWindow(QMainWindow):
         if path_display is not None:
             path = getattr(self, "_current_recipe_path", None) or ""
             path_display.setText(path)
+        self._ensure_recipe_readonly_view()
         view = getattr(self, "_recipe_readonly_view", None)
         if view is None:
             return
@@ -1248,6 +1420,40 @@ class MainWindow(QMainWindow):
             view.set_data(data)
         else:
             view.clear()
+
+    def _switch_to_recipe_tab(self) -> None:
+        """Show the Recipe tab (read-only view with all sub-tabs: GENERAL, PER, LIV, SPECTRUM, Temperature Stability)."""
+        tb = getattr(self, "tabs", None)
+        if tb is None:
+            return
+        for i in range(tb.count()):
+            if tb.tabText(i) == "Recipe":
+                tb.setCurrentIndex(i)
+                return
+
+    def _apply_recipe_from_path(self, path: str) -> None:
+        """Load recipe file into main window state and refresh the Recipe tab (all sections via set_data)."""
+        path = (path or "").strip()
+        if not path:
+            return
+        try:
+            data = self._load_recipe_file(path)
+            if not data:
+                return
+            self._current_recipe_data = data
+            self._current_recipe_path = path
+            self._refresh_recipe_tab()
+        except Exception:
+            pass
+
+    def _on_recipe_saved_from_editor(self, path: str) -> None:
+        """New Recipe window SAVE — mirror file on main Recipe tab and switch to that tab."""
+        self._apply_recipe_from_path(path)
+        self._switch_to_recipe_tab()
+
+    def _on_start_new_recipe_selection_changed(self, path: str) -> None:
+        """Start New: user chose a recipe file — same content as main Recipe tab (no tab switch)."""
+        self._apply_recipe_from_path(path)
 
     def _apply_wavemeter_range_from_recipe(self, recipe_data):
         """Set wavemeter range from recipe wavelength: <1000 -> 480-1000 (W0), else 1000-1650 (W1). Only sends to instrument if wavemeter is connected."""
@@ -1912,17 +2118,11 @@ class MainWindow(QMainWindow):
         self._footer_connecting_clear_timer.timeout.connect(self._clear_footer_connecting)
 
     def _refresh_footer(self, state: dict):
-        vm = self._viewmodel
-
         def _status(key: str) -> str:
-            """Connected in green + grey (simulation) when using a simulator; Disconnected in red otherwise."""
+            """Connected in green; Disconnected in red."""
             ok = state.get(key, False)
-            sim = vm.is_instrument_simulated(key)
             if ok:
-                s = '<span style="color:#4caf50;">Connected</span>'
-                if sim:
-                    s += ' <span style="color:#9e9e9e;font-size:11px;">(simulation)</span>'
-                return s
+                return '<span style="color:#4caf50;">Connected</span>'
             return '<span style="color:#f44336;">Disconnected</span>'
 
         parts = [
@@ -2019,6 +2219,12 @@ class MainWindow(QMainWindow):
 
     def _on_tabs_current_changed(self, _index: int) -> None:
         """Re-apply last Arroyo snapshot, then poll so Laser/TEC boxes match hardware on any tab."""
+        # Recipe tab — ensure read-only view exists if user opens tab before deferred timer runs.
+        try:
+            if self.tabs.tabText(_index) == "Recipe":
+                self._ensure_recipe_readonly_view()
+        except Exception:
+            pass
         if self._last_arroyo_readings is not None:
             self._apply_arroyo_readings_to_panels(self._last_arroyo_readings)
         if self._viewmodel.is_arroyo_connected():
@@ -2368,9 +2574,8 @@ class MainWindow(QMainWindow):
         conn_hint.setStyleSheet("color: #aaaaaa; font-size: 11px; padding: 6px 2px 0 2px;")
         layout.addWidget(conn_hint)
         layout.addStretch()
-        # Load saved addresses into combos and optionally auto-connect once (only first time)
+        # Saved addresses + background scan run from _complete_heavy_startup (after first paint), not here.
         self._connection_tab_saved_applied = False
-        self._apply_saved_addresses_and_auto_connect()
         return w
 
     def _on_ando_center(self):
@@ -2699,12 +2904,12 @@ class MainWindow(QMainWindow):
         else:
             QTimer.singleShot(delay_ms, lambda addr=a: self._viewmodel.connect_wavemeter(addr))
 
-    def _on_connect_all(self, use_saved=None, wavemeter_delay_ms: int = 700):
-        """Connect to all instruments. If use_saved is a dict (from load_saved_addresses), use those addresses; otherwise use current combo values."""
+    def _on_connect_all(self, use_saved=None, wavemeter_delay_ms: int = 700, defer_prm_ms: int = 0):
+        """Connect to all instruments. If use_saved is a dict (from load_saved_addresses), use those addresses; otherwise use current combo values.
+        defer_prm_ms > 0: schedule PRM (blocking Kinesis) after that many ms so other workers connect first (startup auto-connect)."""
         self._set_footer_connecting()
         # Button click passes bool (clicked signal); only use saved when explicitly given a dict
         if isinstance(use_saved, dict):
-            self.main_status_log.appendPlainText("Connect All: connecting with saved addresses...")
             attempts = []
             port = (use_saved.get("arroyo_port") or "").strip()
             if port:
@@ -2724,8 +2929,12 @@ class MainWindow(QMainWindow):
                 attempts.append(("Wavemeter", addr))
             serial_number = (use_saved.get("prm_serial") or "").strip()
             if serial_number:
-                self._viewmodel.connect_prm(serial_number)
-                attempts.append(("PRM", serial_number))
+                if defer_prm_ms > 0:
+                    QTimer.singleShot(int(defer_prm_ms), lambda s=serial_number: self._viewmodel.connect_prm(s))
+                    attempts.append(("PRM", serial_number + " (queued)"))
+                else:
+                    self._viewmodel.connect_prm(serial_number)
+                    attempts.append(("PRM", serial_number))
             port = (use_saved.get("gentec_port") or "").strip()
             if port:
                 self._viewmodel.connect_gentec(port)
@@ -2736,7 +2945,6 @@ class MainWindow(QMainWindow):
                 attempts.append(("Thorlabs", visa_resource))
             _log_connect_attempts(attempts)
             return
-        self.main_status_log.appendPlainText("Connect All: connecting instruments...")
         attempts = []
         port = self.available_ports_combo.currentText().strip()
         if port and port != "(no ports found)":
@@ -2756,8 +2964,12 @@ class MainWindow(QMainWindow):
             attempts.append(("Wavemeter", addr))
         serial_number = self.prm_serial_combo.currentText().strip()
         if serial_number and serial_number != "(no devices found)":
-            self._viewmodel.connect_prm(serial_number)
-            attempts.append(("PRM", serial_number))
+            if defer_prm_ms > 0:
+                QTimer.singleShot(int(defer_prm_ms), lambda s=serial_number: self._viewmodel.connect_prm(s))
+                attempts.append(("PRM", serial_number + " (queued)"))
+            else:
+                self._viewmodel.connect_prm(serial_number)
+                attempts.append(("PRM", serial_number))
         port = self.gentec_ports_combo.currentText().strip()
         if port and port != "(no ports found)":
             self._viewmodel.connect_gentec(port)
@@ -2985,7 +3197,7 @@ class MainWindow(QMainWindow):
         self.main_status_log.appendPlainText("Connection tab: full device lists loaded (background scan).")
 
     def _ensure_actuator_manual(self) -> bool:
-        """Require Connection-tab connect; warn if simulation (no real serial)."""
+        """Require Connection-tab connect before Manual Control moves."""
         if not self._viewmodel.get_connection_state().get("Actuator"):
             self._viewmodel.status_log_message.emit(
                 "Actuator: Not connected — Connection tab: Scan COM, select port, Connect."
@@ -3001,11 +3213,6 @@ class MainWindow(QMainWindow):
                 "Then try Move / Home again on Manual Control.",
             )
             return False
-        if self._viewmodel.is_instrument_simulated("Actuator"):
-            self._viewmodel.status_log_message.emit(
-                "Actuator: Simulation — no serial to hardware. "
-                "Turn off simulate_actuator (or simulate_except_measurement) in instrument_config.ini to use COM."
-            )
         return True
 
     def _on_actuator_move_a(self):
@@ -3335,6 +3542,7 @@ class MainWindow(QMainWindow):
                 (ex.liv_plot_clear, prev.clear_plot),
                 (ex.liv_plot_update, prev.on_plot_update),
                 (ex.liv_power_reading_update, prev.on_power_reading_update),
+                (ex.liv_log_message, prev.append_process_log),
                 (prev.stop_requested, self._on_stop_clicked),
             ):
                 try:
@@ -3356,6 +3564,8 @@ class MainWindow(QMainWindow):
             | QtCompat.WindowCloseButtonHint
         )
         self._liv_test_window.set_params(params)
+        if hasattr(self._liv_test_window, "clear_process_log"):
+            self._liv_test_window.clear_process_log()
         self._liv_test_window.setAttribute(QtCompat.WA_DeleteOnClose, True)
         self._liv_test_window.destroyed.connect(self._on_liv_test_window_destroyed)
         if ex is not None:
@@ -3368,6 +3578,9 @@ class MainWindow(QMainWindow):
             )
             cast(Any, ex.liv_power_reading_update).connect(
                 self._liv_test_window.on_power_reading_update, _qc
+            )
+            cast(Any, ex.liv_log_message).connect(
+                self._liv_test_window.append_process_log, _qc
             )
             cast(Any, self._liv_test_window.stop_requested).connect(
                 self._on_stop_clicked, _qc
@@ -3393,6 +3606,7 @@ class MainWindow(QMainWindow):
         if prev is not None and ex is not None:
             for sig, slot in (
                 (ex.per_test_result, prev.update_live),
+                (ex.per_log_message, prev.append_process_log),
                 (prev.stop_requested, self._on_per_window_stop_requested),
             ):
                 try:
@@ -3413,12 +3627,17 @@ class MainWindow(QMainWindow):
             | QtCompat.WindowCloseButtonHint
         )
         self._per_test_window.set_params(params or {})
+        if hasattr(self._per_test_window, "clear_process_log"):
+            self._per_test_window.clear_process_log()
         self._per_test_window.setAttribute(QtCompat.WA_DeleteOnClose, True)
         self._per_test_window.destroyed.connect(self._on_per_test_window_destroyed)
         if ex is not None:
             _qc = QtCompat.QueuedConnection
             cast(Any, ex.per_test_result).connect(
                 self._per_test_window.update_live, _qc
+            )
+            cast(Any, ex.per_log_message).connect(
+                self._per_test_window.append_process_log, _qc
             )
             cast(Any, self._per_test_window.stop_requested).connect(
                 self._on_per_window_stop_requested, _qc
@@ -3432,7 +3651,12 @@ class MainWindow(QMainWindow):
 
     def _on_per_window_stop_requested(self):
         """PER window Stop: stop sequence, immediate PRM stop, then home and close PER window."""
-        self._on_status_log_message("STOP: Stop requested from PER window.")
+        ex = getattr(self, "_test_sequence_executor", None)
+        if ex is not None:
+            try:
+                cast(Any, ex.per_log_message).emit("STOP: Stop requested from PER window.")
+            except Exception:
+                pass
         self._set_test_status("Stopping...", "#FF9800")
         if self._test_sequence_executor is not None:
             self._test_sequence_executor.stop()
@@ -3596,6 +3820,8 @@ class MainWindow(QMainWindow):
                         pass
                 self._liv_calc_overlay_items = []
                 dash = QtCompat.DashLine
+                dot = QtCompat.DotLine
+                dash_dot = QtCompat.DashDotLine
                 ir_m = None
                 pr_mw = None
                 try:
@@ -3607,25 +3833,25 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pr_mw = None
                 if ith is not None and float(ith) > 0:
-                    ln = PG.InfiniteLine(pos=float(ith), angle=90, pen=PG.mkPen("#2e7d32", width=2, style=dash))
+                    ln = PG.InfiniteLine(pos=float(ith), angle=90, pen=PG.mkPen("#000000", width=2, style=dash))
                     p_item.addItem(ln)
                     self._liv_calc_overlay_items.append(ln)
                 if ir_m is not None and min(currents) <= ir_m <= max(currents):
-                    ln2 = PG.InfiniteLine(pos=float(ir_m), angle=90, pen=PG.mkPen("#e65100", width=2, style=dash))
+                    ln2 = PG.InfiniteLine(pos=float(ir_m), angle=90, pen=PG.mkPen("#000000", width=2, style=dot))
                     p_item.addItem(ln2)
                     self._liv_calc_overlay_items.append(ln2)
                 if pr_mw is not None and pr_mw > 0:
-                    hl = PG.InfiniteLine(pos=float(pr_mw), angle=0, pen=PG.mkPen("#1565c0", width=2, style=dash))
+                    hl = PG.InfiniteLine(pos=float(pr_mw), angle=0, pen=PG.mkPen("#000000", width=2, style=dash_dot))
                     p_item.addItem(hl)
                     self._liv_calc_overlay_items.append(hl)
                 if ir_m is not None and p_ir is not None:
-                    sc = PG.ScatterPlotItem([float(ir_m)], [float(p_ir)], size=12, pen=PG.mkPen("#c2185b", width=2),
-                                            brush=PG.mkBrush(200, 25, 90, 200), symbol="star")
+                    sc = PG.ScatterPlotItem([float(ir_m)], [float(p_ir)], size=12, pen=PG.mkPen("#000000", width=2),
+                                            brush=PG.mkBrush(0, 0, 0, 220), symbol="star")
                     p_item.addItem(sc)
                     self._liv_calc_overlay_items.append(sc)
                 if pr_mw is not None and i_pr is not None:
-                    sc2 = PG.ScatterPlotItem([float(i_pr)], [float(pr_mw)], size=10, pen=PG.mkPen("#00838f", width=2),
-                                             brush=PG.mkBrush(0, 130, 150, 200), symbol="d")
+                    sc2 = PG.ScatterPlotItem([float(i_pr)], [float(pr_mw)], size=10, pen=PG.mkPen("#000000", width=2),
+                                             brush=PG.mkBrush(0, 0, 0, 220), symbol="d")
                     p_item.addItem(sc2)
                     self._liv_calc_overlay_items.append(sc2)
         except Exception:
@@ -3687,16 +3913,21 @@ class MainWindow(QMainWindow):
 
     def _reset_spectrum_plot_axis_labels(self) -> None:
         """Default axis titles before/after a run (Spectrum tab)."""
-        sp = getattr(self, "spectrum_os_plot", None)
-        if sp is None:
-            return
-        pi = cast(Any, sp.getPlotItem())
         tc = getattr(self, "_spectrum_axis_text_color", PYQTGRAPH_AXIS_TEXT)
         bottom = getattr(self, "_spectrum_axis_bottom_default", "Wavelength (nm)")
         left = getattr(self, "_spectrum_axis_left_default", "Level (dBm)")
-        pi.setTitle("Ando sweep — LVL (dBm)", color=tc)
-        pi.setLabel("bottom", bottom, color=tc)
-        pi.setLabel("left", left, color=tc)
+        sp = getattr(self, "spectrum_os_plot", None)
+        if sp is not None:
+            pi = cast(Any, sp.getPlotItem())
+            pi.setTitle("Ando sweep — LVL (dBm)", color=tc)
+            pi.setLabel("bottom", bottom, color=tc)
+            pi.setLabel("left", left, color=tc)
+        spf = getattr(self, "spectrum_first_os_plot", None)
+        if spf is not None:
+            pif = cast(Any, spf.getPlotItem())
+            pif.setTitle("First sweep — LVL (dBm)", color=tc)
+            pif.setLabel("bottom", bottom, color=tc)
+            pif.setLabel("left", left, color=tc)
 
     @staticmethod
     def _spectrum_peak_wavelength_from_trace(w: List[float], l: List[float]) -> Optional[float]:
@@ -3726,51 +3957,105 @@ class MainWindow(QMainWindow):
         except Exception:
             return list(wdata)
 
+    def _spectrum_apply_viewbox_axes_main_tab(self, vb: Any, result: Any, wm: Optional[float], ldata: List[float]) -> None:
+        """X: wavemeter ± span/2 when aligned; else CTR ± span/2 from result. Y: Ando REFL / LSCL (log) or trace padding."""
+        span_nm = float(getattr(result, "span_nm", 0.0) or 0.0)
+        ref = float(getattr(result, "ref_level_dbm", -10.0))
+        ls = float(getattr(result, "level_scale_db_per_div", 10.0))
+        center = float(getattr(result, "center_nm", 0.0) or 0.0)
+        if wm is not None and span_nm > 0:
+            vb.setXRange(float(wm) - span_nm / 2.0, float(wm) + span_nm / 2.0, padding=0.02)
+        elif _spectrum_plot_x_range_nm is not None and center > 0 and span_nm > 0:
+            x0, x1 = _spectrum_plot_x_range_nm(center, span_nm)
+            vb.setXRange(x0, x1, padding=0.02)
+        else:
+            vb.autoRange()
+        if _spectrum_plot_y_range_dbm is not None:
+            yr = _spectrum_plot_y_range_dbm(ref, ls)
+            if yr is not None:
+                vb.setYRange(yr[0], yr[1], padding=0.02)
+                return
+        if ldata:
+            lo = min(float(x) for x in ldata)
+            hi = max(float(x) for x in ldata)
+            pad = max(0.5, (hi - lo) * 0.1)
+            vb.setYRange(lo - pad, hi + pad, padding=0.02)
+
     def _on_spectrum_result(self, result):
-        """Second sweep only: Ando LDATA (Y); X = WDATA shifted to wavemeter peak. FAIL + reasons from result."""
+        """Update Spectrum tab: First sweep sub-tab = first WDATA/LDATA; primary sub-tab = second sweep only."""
         if not _PG_AVAILABLE:
             return
         curve = getattr(self, "spectrum_os_curve", None)
+        if curve is None and not getattr(self, "_graph_tabs_installed", False):
+            self._deferred_install_graph_tabs()
+            curve = getattr(self, "spectrum_os_curve", None)
         if curve is None:
             return
-        w2 = list(getattr(result, "second_sweep_wdata", None) or [])
-        l2 = list(getattr(result, "second_sweep_ldata", None) or [])
-        n2 = min(len(w2), len(l2))
-        wm = getattr(result, "second_wavemeter_nm", None)
-        if wm is None:
-            wm = getattr(result, "wavemeter_nm_for_axis_label", None)
-        peak_ando = getattr(result, "peak_wavelength_second_nm", None)
-        if peak_ando is None:
-            peak_ando = getattr(result, "peak_wavelength", None)
-        if peak_ando is None and n2:
-            peak_ando = self._spectrum_peak_wavelength_from_trace(w2[:n2], l2[:n2])
+        passed = bool(getattr(result, "passed", False))
+        fail_reasons = list(getattr(result, "fail_reasons", None) or [])
+        detail = "; ".join(str(x) for x in fail_reasons) if fail_reasons else ""
+
+        def _pair(raw_w: Any, raw_l: Any) -> Tuple[List[float], List[float]]:
+            if _spectrum_pair_trace_floats is not None:
+                pw, pl = _spectrum_pair_trace_floats(raw_w, raw_l)
+                return list(pw or []), list(pl or [])
+            w = list(raw_w or [])
+            l = list(raw_l or [])
+            n = min(len(w), len(l))
+            return w[:n], l[:n]
+
+        w2, l2 = _pair(getattr(result, "second_sweep_wdata", None), getattr(result, "second_sweep_ldata", None))
+        use_second = len(w2) > 0 and len(l2) > 0
+        span_nm = float(getattr(result, "span_nm", 0.0) or 0.0)
+
+        if use_second:
+            wm = getattr(result, "second_wavemeter_nm", None)
+            if wm is None:
+                wm = getattr(result, "wavemeter_nm_for_axis_label", None)
+            peak_ando = getattr(result, "peak_wavelength_second_nm", None)
+            if peak_ando is None:
+                peak_ando = getattr(result, "peak_wavelength", None)
+            if peak_ando is None and len(w2) > 0:
+                peak_ando = self._spectrum_peak_wavelength_from_trace(w2, l2)
+        else:
+            wm = getattr(result, "first_wavemeter_nm", None)
+            if wm is None:
+                wm = getattr(result, "wavemeter_nm_for_axis_label", None)
+            peak_ando = None
 
         if hasattr(self, "spectrum_wavemeter_reading") and self.spectrum_wavemeter_reading is not None:
             self.spectrum_wavemeter_reading.setText("{:.6f}".format(float(wm)) if wm is not None else "—")
 
-        if n2:
-            x_plot = self._spectrum_x_aligned_to_wavemeter(w2[:n2], l2[:n2], peak_ando, wm)
-            curve.setData(x_plot, l2[:n2])
+        if use_second:
+            x_plot = self._spectrum_x_aligned_to_wavemeter(w2, l2, peak_ando, wm)
+            curve.setData(x_plot, l2)
             try:
                 sp = getattr(self, "spectrum_os_plot", None)
                 if sp is not None:
                     pi = cast(Any, sp.getPlotItem())
                     tc = getattr(self, "_spectrum_axis_text_color", PYQTGRAPH_AXIS_TEXT)
-                    pi.setTitle("Ando sweep — LVL (dBm)", color=tc)
+                    pi.setTitle(
+                        "Ando — Second sweep · LVL (dBm)",
+                        color=tc,
+                    )
+                    pi.setLabel("left", "Level (dBm)", color=tc)
                     if wm is not None:
                         pi.setLabel(
                             "bottom",
-                            "Wavelength (nm) — peak aligned to wavemeter {:.4f} nm".format(float(wm)),
-                            color=tc,
-                        )
-                        pi.setLabel(
-                            "left",
-                            "Level (dBm)\nwavemeter ref: {:.4f} nm".format(float(wm)),
+                            "Wavelength (nm) — wavemeter {:.4f} nm · span {:.3f} nm".format(float(wm), span_nm),
                             color=tc,
                         )
                     else:
-                        self._reset_spectrum_plot_axis_labels()
-                    cast(Any, sp).getPlotItem().getViewBox().autoRange()
+                        pi.setLabel(
+                            "bottom",
+                            "Wavelength (nm) — span {:.3f} nm · Ando CTR {:.4f} nm".format(
+                                span_nm,
+                                float(getattr(result, "center_nm", 0.0) or 0.0),
+                            ),
+                            color=tc,
+                        )
+                    vb = cast(Any, sp).getPlotItem().getViewBox()
+                    self._spectrum_apply_viewbox_axes_main_tab(vb, result, wm, l2)
             except Exception:
                 pass
         else:
@@ -3780,53 +4065,79 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        pk = getattr(result, "peak_wavelength", None)
-        pdb = getattr(result, "peak_level_dbm", None)
-        fwhm = getattr(result, "fwhm", None)
-        smsr = getattr(result, "smsr", None)
-        passed = bool(getattr(result, "passed", False))
-        if hasattr(self, "spectrum_peak_wl") and self.spectrum_peak_wl is not None:
-            self.spectrum_peak_wl.setText("{:.6f}".format(float(pk)) if pk is not None else "—")
-        if hasattr(self, "spectrum_peak_dbm") and self.spectrum_peak_dbm is not None:
-            self.spectrum_peak_dbm.setText("{:.3f}".format(float(pdb)) if pdb is not None else "—")
-        if hasattr(self, "spectrum_fwhm") and self.spectrum_fwhm is not None:
-            self.spectrum_fwhm.setText("{:.6f}".format(float(fwhm)) if fwhm is not None else "—")
-        if hasattr(self, "spectrum_smsr") and self.spectrum_smsr is not None:
-            self.spectrum_smsr.setText("{:.2f}".format(float(smsr)) if smsr is not None else "—")
-        if hasattr(self, "spectrum_pass_label") and self.spectrum_pass_label is not None:
-            self.spectrum_pass_label.setText("PASS" if passed else "FAIL")
-            self.spectrum_pass_label.setStyleSheet(
-                "color: #81c784; font-size: 12px; font-weight: bold;"
-                if passed
-                else "color: #ef9a9a; font-size: 12px; font-weight: bold;"
-            )
+        first_curve = getattr(self, "spectrum_first_os_curve", None)
+        if first_curve is not None:
+            w1, l1 = _pair(getattr(result, "first_sweep_wdata", None), getattr(result, "first_sweep_ldata", None))
+            if len(w1) > 0 and len(l1) > 0:
+                wm1 = getattr(result, "first_wavemeter_nm", None)
+                peak1 = getattr(result, "peak_wavelength_first_nm", None)
+                if peak1 is None:
+                    peak1 = self._spectrum_peak_wavelength_from_trace(w1, l1)
+                x1 = self._spectrum_x_aligned_to_wavemeter(w1, l1, peak1, wm1)
+                first_curve.setData(x1, l1)
+                try:
+                    spf = getattr(self, "spectrum_first_os_plot", None)
+                    if spf is not None:
+                        pif = cast(Any, spf.getPlotItem())
+                        tc = getattr(self, "_spectrum_axis_text_color", PYQTGRAPH_AXIS_TEXT)
+                        pif.setTitle("Ando — First sweep · LVL (dBm)", color=tc)
+                        pif.setLabel("left", "Level (dBm)", color=tc)
+                        if wm1 is not None:
+                            pif.setLabel(
+                                "bottom",
+                                "Wavelength (nm) — wavemeter {:.4f} nm · span {:.3f} nm".format(float(wm1), span_nm),
+                                color=tc,
+                            )
+                        else:
+                            pif.setLabel(
+                                "bottom",
+                                "Wavelength (nm) — span {:.3f} nm · Ando CTR {:.4f} nm".format(
+                                    span_nm,
+                                    float(getattr(result, "center_nm", 0.0) or 0.0),
+                                ),
+                                color=tc,
+                            )
+                        vbf = cast(Any, spf).getPlotItem().getViewBox()
+                        self._spectrum_apply_viewbox_axes_main_tab(vbf, result, wm1, l1)
+                except Exception:
+                    pass
+            else:
+                first_curve.setData([], [])
 
-        try:
-            if not passed:
-                fr = list(getattr(result, "fail_reasons", []) or [])
-                self._append_reason_for_failure_box(
-                    "SPECTRUM",
-                    fr if fr else ["Spectrum did not pass."],
-                    False,
-                )
-        except Exception:
-            pass
+        finalize = bool(getattr(result, "spectrum_finalize_secondary_window", True))
+        if finalize:
+            pk = getattr(result, "peak_wavelength", None)
+            pdb = getattr(result, "peak_level_dbm", None)
+            fwhm = getattr(result, "fwhm", None)
+            smsr = getattr(result, "smsr", None)
+            if hasattr(self, "spectrum_peak_wl") and self.spectrum_peak_wl is not None:
+                self.spectrum_peak_wl.setText("{:.6f}".format(float(pk)) if pk is not None else "—")
+            if hasattr(self, "spectrum_peak_dbm") and self.spectrum_peak_dbm is not None:
+                self.spectrum_peak_dbm.setText("{:.3f}".format(float(pdb)) if pdb is not None else "—")
+            if hasattr(self, "spectrum_fwhm") and self.spectrum_fwhm is not None:
+                self.spectrum_fwhm.setText("{:.6f}".format(float(fwhm)) if fwhm is not None else "—")
+            if hasattr(self, "spectrum_smsr") and self.spectrum_smsr is not None:
+                self.spectrum_smsr.setText("{:.2f}".format(float(smsr)) if smsr is not None else "—")
+            if hasattr(self, "spectrum_pass_label") and self.spectrum_pass_label is not None:
+                if passed:
+                    self.spectrum_pass_label.setText("PASS")
+                    self.spectrum_pass_label.setStyleSheet("color: #81c784; font-size: 12px; font-weight: bold;")
+                else:
+                    self.spectrum_pass_label.setText("FAIL")
+                    self.spectrum_pass_label.setStyleSheet("color: #ef9a9a; font-size: 12px; font-weight: bold;")
 
-        try:
-            sw = getattr(self, "_spectrum_test_window", None)
-            if sw is not None and hasattr(sw, "set_finished"):
-                reasons = getattr(result, "fail_reasons", None) or []
-                detail = "; ".join(str(x) for x in reasons) if reasons else ""
-                sw.set_finished(passed, detail)
-        except Exception:
-            pass
+            try:
+                sw = getattr(self, "_spectrum_test_window", None)
+                if sw is not None and hasattr(sw, "set_finished"):
+                    sw.set_finished(passed, detail if not passed else "")
+            except Exception:
+                pass
+            try:
+                QTimer.singleShot(600, self._close_spectrum_test_window)
+            except Exception:
+                pass
 
-        try:
-            QTimer.singleShot(450, self._close_spectrum_test_window)
-        except Exception:
-            pass
-
-    def _close_spectrum_test_window(self):
+    def _close_spectrum_test_window(self) -> None:
         w = getattr(self, "_spectrum_test_window", None)
         if w is None:
             return
@@ -3836,6 +4147,13 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_spectrum_test_window_destroyed(self):
+        ex = getattr(self, "_test_sequence_executor", None)
+        w = getattr(self, "_spectrum_test_window", None)
+        if ex is not None and w is not None:
+            try:
+                cast(Any, ex.spectrum_log_message).disconnect(w.append_process_log)
+            except Exception:
+                pass
         self._spectrum_test_window = None
         self._disconnect_spectrum_live_signals()
 
@@ -3843,7 +4161,7 @@ class MainWindow(QMainWindow):
         ex = getattr(self, "_test_sequence_executor", None)
         if ex is None:
             return
-        for name in ("spectrum_live_trace", "spectrum_wavemeter_reading"):
+        for name in ("spectrum_live_trace", "spectrum_wavemeter_reading", "spectrum_step_status"):
             sig = getattr(ex, name, None)
             if sig is None:
                 continue
@@ -3851,6 +4169,15 @@ class MainWindow(QMainWindow):
                 sig.disconnect()
             except Exception:
                 pass
+
+    @pyqtSlot()
+    def blocking_open_spectrum_test_window(self):
+        """Open Spectrum window from the test worker via BlockingQueuedConnection before spec.run() (avoids live-plot race)."""
+        ex = getattr(self, "_test_sequence_executor", None)
+        params: dict = {}
+        if ex is not None:
+            params = getattr(ex, "_spectrum_window_params_pending", None) or {}
+        self._open_spectrum_test_window(params)
 
     def _open_spectrum_test_window(self, params: dict):
         """Open Spectrum step window on the secondary monitor (same pattern as PER)."""
@@ -3873,6 +4200,8 @@ class MainWindow(QMainWindow):
         self._spectrum_test_window.set_params(params or {})
         if hasattr(self._spectrum_test_window, "clear_live_plot"):
             self._spectrum_test_window.clear_live_plot()
+        if hasattr(self._spectrum_test_window, "clear_process_log"):
+            self._spectrum_test_window.clear_process_log()
         self._spectrum_test_window.setAttribute(QtCompat.WA_DeleteOnClose, True)
         self._spectrum_test_window.destroyed.connect(self._on_spectrum_test_window_destroyed)
         _qc = QtCompat.QueuedConnection
@@ -3884,6 +4213,15 @@ class MainWindow(QMainWindow):
                 cast(Any, ex.spectrum_wavemeter_reading).connect(
                     self._spectrum_test_window.set_wavemeter_reading, _qc
                 )
+                if hasattr(self._spectrum_test_window, "set_status"):
+                    cast(Any, ex.spectrum_step_status).connect(self._spectrum_test_window.set_status, _qc)
+                if hasattr(self._spectrum_test_window, "append_process_log"):
+                    cast(Any, ex.spectrum_log_message).connect(
+                        self._spectrum_test_window.append_process_log, _qc
+                    )
+                    cast(Any, ex.spectrum_step_status).connect(
+                        self._spectrum_test_window.append_process_log, _qc
+                    )
             except Exception:
                 pass
         self._spectrum_test_window.show()
@@ -3895,7 +4233,50 @@ class MainWindow(QMainWindow):
         )
 
     def _on_temperature_stability_window_destroyed(self) -> None:
+        ex = getattr(self, "_test_sequence_executor", None)
+        w = getattr(self, "_temperature_stability_window", None)
+        if ex is not None and w is not None:
+            try:
+                cast(Any, ex.stability_log_message).disconnect(w.append_process_log)
+            except Exception:
+                pass
         self._temperature_stability_window = None
+
+    @pyqtSlot(object)
+    def _finalize_temperature_stability_step(self, result: Any) -> None:
+        """After each stability block: refresh main Temperature Stability tab (full plot), show pass/fail on float window, then close it."""
+        try:
+            self._on_stability_result(result)
+        except Exception:
+            pass
+        try:
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == "Temperature Stability":
+                    self.tabs.setCurrentIndex(i)
+                    break
+        except Exception:
+            pass
+        passed = bool(getattr(result, "passed", False))
+        fr = list(getattr(result, "fail_reasons", None) or [])
+        detail = "; ".join(str(x) for x in fr) if fr else ("PASS" if passed else "")
+        w = getattr(self, "_temperature_stability_window", None)
+        if w is not None:
+            try:
+                if hasattr(w, "set_finished"):
+                    w.set_finished(passed, detail)
+            except Exception:
+                pass
+            delay_ms = 600 if passed else 100
+            QTimer.singleShot(delay_ms, self._close_temperature_stability_window_safe)
+
+    def _close_temperature_stability_window_safe(self) -> None:
+        w = getattr(self, "_temperature_stability_window", None)
+        if w is None:
+            return
+        try:
+            w.close()
+        except Exception:
+            pass
 
     def _open_temperature_stability_window(self, params: dict):
         """Open Temperature Stability on the secondary monitor: left RCP, right live plot (no main-tab switch)."""
@@ -3915,10 +4296,17 @@ class MainWindow(QMainWindow):
             | QtCompat.WindowCloseButtonHint
         )
         self._temperature_stability_window.set_params(params or {})
+        if hasattr(self._temperature_stability_window, "clear_process_log"):
+            self._temperature_stability_window.clear_process_log()
         self._temperature_stability_window.setAttribute(QtCompat.WA_DeleteOnClose, True)
         self._temperature_stability_window.destroyed.connect(self._on_temperature_stability_window_destroyed)
         _qc = QtCompat.QueuedConnection
         cast(Any, self._temperature_stability_window.stop_requested).connect(self._on_stop_clicked, _qc)
+        ex = getattr(self, "_test_sequence_executor", None)
+        if ex is not None and hasattr(self._temperature_stability_window, "append_process_log"):
+            cast(Any, ex.stability_log_message).connect(
+                self._temperature_stability_window.append_process_log, _qc
+            )
         self._temperature_stability_window.show()
         QTimer.singleShot(
             50,
@@ -4033,6 +4421,10 @@ class MainWindow(QMainWindow):
         if not seq:
             QMessageBox.information(self, "Run", "Recipe has no test sequence.")
             return
+        # PyQtGraph tabs are normally installed after first paint. If Run starts before that,
+        # spectrum_os_curve (etc.) is still None and spectrum_test_result cannot draw on the main tab.
+        if not getattr(self, "_graph_tabs_installed", False):
+            self._deferred_install_graph_tabs()
         self._set_test_status("Running", "#2196F3")  # blue
         self._set_pass_fail("--", "#555")  # keep gray until result
         if hasattr(self, "main_failure_reason"):
@@ -4063,10 +4455,16 @@ class MainWindow(QMainWindow):
             cast(Any, self._test_sequence_executor.sequence_step_failed).connect(
                 self._on_sequence_step_failed, QtCompat.QueuedConnection
             )
-            self._test_sequence_executor.spectrum_test_result.connect(self._on_spectrum_result)
+            _qc = QtCompat.QueuedConnection
+            cast(Any, self._test_sequence_executor.spectrum_test_result).connect(
+                self._on_spectrum_result, _qc
+            )
             self._test_sequence_executor.stability_test_result.connect(self._on_stability_result)
             cast(Any, self._test_sequence_executor.stability_process_window_requested).connect(
                 self._open_temperature_stability_window, QtCompat.QueuedConnection
+            )
+            cast(Any, self._test_sequence_executor.stability_step_finished).connect(
+                self._finalize_temperature_stability_step, QtCompat.QueuedConnection
             )
             self._test_sequence_executor.test_window_requested.connect(self._on_test_window_requested)
             # LIV window now opens from liv_process_window_requested (after laser is ON).
@@ -4075,7 +4473,6 @@ class MainWindow(QMainWindow):
                 self._on_liv_process_window_requested
             )
             self._test_sequence_executor.connect_fiber_before_liv_requested.connect(self._on_connect_fiber_before_liv)
-            _qc = QtCompat.QueuedConnection
             cast(Any, self._test_sequence_executor.liv_pre_start_prompt_requested).connect(
                 self._on_liv_pre_start_prompt, _qc
             )
@@ -4152,6 +4549,7 @@ class MainWindow(QMainWindow):
     def _on_start_new_clicked(self):
         dialog = TestInformationDialog(self)
         dialog.clear_requested.connect(self._on_start_new_clear_requested)
+        dialog.recipe_path_changed.connect(self._on_start_new_recipe_selection_changed)
         # Pre-fill with current details so user sees existing data (persist until test done or Clear)
         op = (self.details_op_name.text() or "").strip()
         if op == "—":
@@ -4179,27 +4577,53 @@ class MainWindow(QMainWindow):
             self.details_wavelength.setText(dialog.get_wavelength() or "—")
             self.details_smsr_on.setText("—")
             self._startnew_comments = dialog.get_comments() or ""
+            # Recipe tab: always mirror the path chosen here — reload from disk so resaved files show up.
             if recipe_path:
                 try:
                     data = self._load_recipe_file(recipe_path)
                     if data:
                         self._current_recipe_data = data
                         self._current_recipe_path = recipe_path
-                        self._refresh_recipe_tab()
-                        # Start New only: apply wavemeter range immediately from recipe wavelength (480–1000 or 1000–1650).
-                        self._apply_wavemeter_range_from_recipe(data)
-                        # Details: SMSR on from recipe (spec.WAVEMETER.smsr)
-                        wm = (data.get("spec") or {}).get("WAVEMETER", data.get("WAVEMETER") or {})
-                        if isinstance(wm, dict):
-                            self.details_smsr_on.setText("Yes" if wm.get("smsr") else "No")
-                        else:
-                            self.details_smsr_on.setText("—")
+                    else:
+                        self._current_recipe_data = None
+                        self._current_recipe_path = None
+                        QMessageBox.warning(
+                            self,
+                            "Recipe",
+                            "Could not read or parse the recipe file:\n{}".format(recipe_path),
+                        )
+                except Exception as e:
+                    self._current_recipe_data = None
+                    self._current_recipe_path = None
+                    QMessageBox.warning(
+                        self,
+                        "Recipe",
+                        "Could not load recipe:\n{}\n\n{}".format(recipe_path, e),
+                    )
+            else:
+                self._current_recipe_data = None
+                self._current_recipe_path = None
+            self._refresh_recipe_tab()
+            data = getattr(self, "_current_recipe_data", None)
+            if isinstance(data, dict):
+                try:
+                    self._apply_wavemeter_range_from_recipe(data)
+                except Exception:
+                    pass
+                try:
+                    ops = data.get("OPERATIONS") or {}
+                    wm = (data.get("spec") or {}).get("WAVEMETER") or ops.get("WAVEMETER") or data.get("WAVEMETER") or {}
+                    if isinstance(wm, dict):
+                        self.details_smsr_on.setText("Yes" if wm.get("smsr") else "No")
+                    else:
+                        self.details_smsr_on.setText("—")
                 except Exception:
                     pass
 
     def _on_new_recipe_clicked(self):
         """Open the full Recipe window on a different monitor, maximized. Independent minimize/restore; closes when main closes."""
         self._recipe_window = RecipeWindow()
+        self._recipe_window.recipe_saved.connect(self._on_recipe_saved_from_editor)
         self._recipe_window.setWindowFlags(self._recipe_window.windowFlags() | QtCompat.Window)
         self._recipe_window.setAttribute(QtCompat.WA_DeleteOnClose, True)
         self._recipe_window.destroyed.connect(self._on_recipe_window_destroyed)

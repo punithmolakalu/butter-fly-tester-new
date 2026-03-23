@@ -258,7 +258,11 @@ class PERProcess:
             sig.emit(*args)
 
     def _log(self, executor: Any, msg: str) -> None:
-        self._emit(executor, "log_message", msg)
+        sig = getattr(executor, "per_log_message", None)
+        if sig is not None and hasattr(sig, "emit"):
+            sig.emit(msg)
+        else:
+            self._emit(executor, "log_message", msg)
 
     def _apply_thorlabs_wavelength(self, wavelength_nm: float, executor: Any) -> bool:
         """
@@ -640,7 +644,7 @@ class PERProcess:
             self._emit_per_done(executor, result, [], [])
             return result
 
-        self._log(executor, "PER: Using live hardware (Thorlabs powermeter + PRM); not simulation.")
+        self._log(executor, "PER: Using live hardware (Thorlabs powermeter + PRM).")
         wl_nm = float(getattr(params, "wavelength_nm", 0.0) or 0.0)
         wavelength_just_set = self._apply_thorlabs_wavelength(wl_nm, executor)
         p0 = self._thorlabs_power_mw_precheck(executor, wavelength_just_set=wavelength_just_set)

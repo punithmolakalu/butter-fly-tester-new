@@ -669,6 +669,17 @@ These are high-level commands that map to panel switch operations:
 
 ---
 
+## IEEE-488.2 and common OSA queries (used by software)
+
+| Command | Description | Query | Parameters |
+|---------|-------------|-------|------------|
+| `*OPC?` | Operation complete (IEEE 488.2) | Yes | None |
+| `SMSR?` | Side-mode suppression ratio (dB) | Yes | None |
+| `ANAR?` | Analysis result (full response string) | Yes | None |
+| `SMPL?` | Sampling points | Yes | None |
+
+---
+
 ## Notes
 
 1. **Query Commands**: Commands marked with `?` are query commands that return data. Use `query()` method instead of `write_command()`.

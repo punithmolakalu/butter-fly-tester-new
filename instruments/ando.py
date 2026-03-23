@@ -12,7 +12,7 @@ import re
 import struct
 import time
 import warnings
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 warnings.filterwarnings("ignore", category=UserWarning, module="gpib_ctypes")
 
@@ -160,6 +160,16 @@ class AndoConnection:
                     self.connected = True
                     self.write_command("REMOTE")
                     time.sleep(0.1)
+                    # Clear host read buffer so the next query is not a stale *IDN? line (USB-GPIB).
+                    try:
+                        from pyvisa.constants import BufferOperation
+
+                        conn.flush(BufferOperation.read_buf)
+                    except Exception:
+                        try:
+                            conn.flush()  # type: ignore[call-arg]
+                        except Exception:
+                            pass
                     return True
                 conn.close()
                 self.gpib_connection = None
@@ -224,11 +234,71 @@ class AndoConnection:
         finally:
             conn.timeout = original_timeout
 
-    def query(self, command: str):
-        if not self.is_connected() or not self.write_command(command):
+    def _flush_read_buffer(self, conn) -> None:
+        """Drop stale bytes in the host read buffer (USB-GPIB often leaves *IDN? lines behind)."""
+        if conn is None:
+            return
+        try:
+            from pyvisa.constants import BufferOperation
+
+            conn.flush(BufferOperation.read_buf)
+        except Exception:
+            try:
+                conn.flush()  # type: ignore[call-arg]
+            except Exception:
+                pass
+
+    @staticmethod
+    def _looks_like_idn_response(text: str) -> bool:
+        """True if text matches a typical *IDN? reply (stale buffer can return this for PKWL? etc.)."""
+        t = (text or "").strip()
+        if len(t) < 12:
+            return False
+        u = t.upper()
+        return "ANDO" in u and "AQ6317" in u and "," in t
+
+    def _query_once(self, conn, cmd: str) -> Optional[str]:
+        """Single write+read; caller flushes buffer first."""
+        qfn = getattr(conn, "query", None)
+        if callable(qfn):
+            try:
+                r = qfn(cmd)
+                if r is None:
+                    return None
+                return str(r).strip()
+            except Exception:
+                pass
+        if not self.write_command(cmd):
             return None
-        time.sleep(0.1)
-        return self.read_response()
+        time.sleep(0.15)
+        try:
+            return self.read_response()
+        except (IOError, OSError, Exception):
+            # Empty read / timeout — callers treat None as "no data" (avoids aborting long Spectrum sequences).
+            return None
+
+    def query(self, command: str):
+        if not self.is_connected():
+            return None
+        conn = self.gpib_connection
+        if conn is None:
+            return None
+        cmd = (command or "").strip()
+        if not cmd:
+            return None
+        is_idn_query = cmd.upper().startswith("*IDN")
+        last: Optional[str] = None
+        for attempt in range(2):
+            self._flush_read_buffer(conn)
+            time.sleep(0.03 if attempt == 0 else 0.12)
+            self._flush_read_buffer(conn)
+            last = self._query_once(conn, cmd)
+            if last is None:
+                return None
+            if is_idn_query or not self._looks_like_idn_response(last) or attempt == 1:
+                return last
+            # Stale *IDN? line read for a different command — retry once after longer settle.
+        return last
 
     def identify(self): return self.query("*IDN?")
     def reset(self): return self.write_command("*RST")
@@ -373,8 +443,15 @@ class AndoConnection:
         r = self.query("PKWL?")
         if r is None:
             return None
+        parts = [p.strip() for p in str(r).split(",") if p.strip()]
         try:
-            return float(str(r).strip().split(",")[0])
+            # Many AQ6317B firmwares return the same 5-field ANA-style line for PKWL? (not a single value).
+            # Layout matches query_analysis_ana: [0]=width nm, [1]=peak λ nm, [2]=peak dBm, …
+            if len(parts) >= 5:
+                return float(parts[1])
+            if len(parts) >= 2:
+                return float(parts[1])
+            return float(parts[0])
         except (TypeError, ValueError, IndexError):
             return None
 
@@ -383,8 +460,13 @@ class AndoConnection:
         r = self.query("PKLVL?")
         if r is None:
             return None
+        parts = [p.strip() for p in str(r).split(",") if p.strip()]
         try:
-            return float(str(r).strip().split(",")[0])
+            if len(parts) >= 5:
+                return float(parts[2])
+            if len(parts) >= 3:
+                return float(parts[2])
+            return float(parts[0])
         except (TypeError, ValueError, IndexError):
             return None
 
@@ -410,6 +492,108 @@ class AndoConnection:
                 continue
         return None
 
+    @staticmethod
+    def _split_analysis_fields(text: Optional[str]) -> List[str]:
+        """Comma- or semicolon-separated fields from ANA?/ANAR? (some firmware uses ';')."""
+        s = str(text or "").strip()
+        if not s:
+            return []
+        if "," in s:
+            return [p.strip() for p in s.split(",") if p.strip()]
+        if ";" in s:
+            return [p.strip() for p in s.split(";") if p.strip()]
+        return [s]
+
+    @staticmethod
+    def _analysis_dict_has_numeric_peak(d: Any) -> bool:
+        """True if dict has a usable peak wavelength (ANA 5-field or ANAR DFB/LED)."""
+        if not isinstance(d, dict):
+            return False
+        if d.get("PK_WL_nm") is not None:
+            return True
+        fields = d.get("fields")
+        if isinstance(fields, (list, tuple)) and len(fields) >= 3:
+            try:
+                float(fields[1])
+                return True
+            except (TypeError, ValueError):
+                pass
+        return False
+
+    def _parse_ana_numeric_response(self, r: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Parse ANA? body into WD/PK fields when the reply is numeric CSV (DFB-style)."""
+        if r is None:
+            return None
+        raw = str(r).strip()
+        parts = self._split_analysis_fields(raw)
+        if len(parts) < 3:
+            return {"raw": raw, "fields": parts}
+        out: Dict[str, Any] = {"raw": raw, "fields": parts}
+        try:
+            out["WD_3dB_nm"] = float(parts[0])
+            out["PK_WL_nm"] = float(parts[1])
+            out["PK_LVL_dBm"] = float(parts[2])
+            if len(parts) >= 4:
+                out["EXTRA_nm"] = float(parts[3])
+            if len(parts) >= 5:
+                out["SMSR_dB"] = float(parts[4])
+        except (TypeError, ValueError, IndexError):
+            return {"raw": raw, "fields": parts}
+        return out
+
+    def query_analysis_ana(self, analysis_hint: str = "") -> Optional[Dict[str, Any]]:
+        """
+        ANA? — on many AQ6317B units this returns comma-separated analysis **results** (DFB-style).
+        The command table also lists ANA? as "analysis mode"; some firmware returns text or short replies here
+        and puts numbers on **ANAR?** only — we fall back to query_analysis_anar in that case.
+
+        ``analysis_hint`` is passed through when falling back to ANAR (e.g. LED vs DFB field layout).
+        """
+        r = self.query("ANA?")
+        parsed = self._parse_ana_numeric_response(r)
+        if parsed is not None and self._analysis_dict_has_numeric_peak(parsed):
+            return parsed
+        fb = self.query_analysis_anar(analysis_hint)
+        if isinstance(fb, dict) and self._analysis_dict_has_numeric_peak(fb):
+            return fb
+        return parsed if parsed is not None else fb
+
+    def query_analysis_anar(self, analysis_hint: str = "") -> Optional[Dict[str, Any]]:
+        """
+        ANAR? — analysis result readback (comma-separated; layout depends on analysis mode).
+
+        Typical DFB-LD (4 fields): PK WL (nm), PK LVL (dBm), SMSR (dB), MODE OFFSET (nm).
+        LED (5 fields): MEAN WL, TOTAL POWER (dBm), PK WL, PK LVL, SPEC WD (nm).
+        """
+        r = self.query("ANAR?")
+        if r is None:
+            return None
+        parts = self._split_analysis_fields(r)
+        out: Dict[str, Any] = {"raw": str(r).strip(), "fields": parts}
+        if not parts:
+            return out
+        a = str(analysis_hint or "").strip().upper()
+        try:
+            if "LED" in a and len(parts) >= 5:
+                out["MEAN_WL_nm"] = float(parts[0])
+                out["TOTAL_POWER_dBm"] = float(parts[1])
+                out["PK_WL_nm"] = float(parts[2])
+                out["PK_LVL_dBm"] = float(parts[3])
+                out["SPEC_WD_nm"] = float(parts[4])
+            elif len(parts) >= 4:
+                # DFB / FP / default 4-field: PK WL, PK LVL, SMSR, MODE OFFSET
+                out["PK_WL_nm"] = float(parts[0])
+                out["PK_LVL_dBm"] = float(parts[1])
+                out["SMSR_dB"] = float(parts[2])
+                out["MODE_OFFSET_nm"] = float(parts[3])
+            elif len(parts) >= 1:
+                out["PK_WL_nm"] = float(parts[0])
+                if len(parts) >= 2:
+                    out["PK_LVL_dBm"] = float(parts[1])
+        except (TypeError, ValueError, IndexError):
+            pass
+        return out
+
     def wait_sweep_done(self, timeout_s: float = 180.0, poll_s: float = 0.25) -> bool:
         """Poll SWEEP? until idle or timeout."""
         t0 = time.time()
@@ -433,6 +617,25 @@ class AndoConnection:
             except (TypeError, ValueError):
                 continue
         return out
+
+    def _strip_leading_count_prefix(self, values: List[float], expected_n: Optional[int] = None) -> List[float]:
+        """
+        Some AQ6317B firmware prefixes trace CSV with a point count (first field = N, then N values).
+        If detected, drop the first element so WDATA/LDATA align with DTNUM?/SMPL.
+        """
+        if len(values) < 2:
+            return values
+        n0 = values[0]
+        try:
+            n_int = int(round(float(n0)))
+        except (TypeError, ValueError):
+            return values
+        rest = values[1:]
+        if len(rest) == n_int:
+            return rest
+        if expected_n is not None and len(rest) == expected_n and n_int in (len(rest), len(values) - 1):
+            return rest
+        return values
 
     def query_sampling_points(self) -> Optional[int]:
         """Return SMPL point count (11–20001) from SMPL?, or None."""
@@ -462,14 +665,108 @@ class AndoConnection:
             return None
 
     def _prepare_trace_read(self) -> None:
-        """REMOTE + trace A write target — helps WDATA?/LDATA? return trace A after sweep."""
+        """
+        Per AQ6317B GP-IB reference:
+        - REMOTE: programmatic control
+        - SD0: string delimiter comma (consistent ASCII trace export)
+        - TRACE A: active trace A (Data Output applies to displayed trace)
+        - WRTA: trace A is write target (same sweep data)
+        - DSPA: display trace A (ensures A is the active trace for data output)
+        """
         try:
             self.write_command("REMOTE")
             time.sleep(0.02)
+            self.write_command("SD0")
+            time.sleep(0.02)
+            self.write_command("TRACE A")
+            time.sleep(0.02)
             self.write_command("WRTA")
+            time.sleep(0.02)
+            self.write_command("DSPA")
             time.sleep(0.05)
         except Exception:
             pass
+
+    def _read_gpib_full_binary_response(self, conn) -> bytes:
+        """
+        Read one instrument message; if IEEE definite-length block (#...), keep reading until
+        header-declared byte count is satisfied (single read_raw() is often incomplete).
+        """
+        try:
+            raw = conn.read_raw()
+        except Exception:
+            return b""
+        if not raw or raw[0:1] != b"#":
+            return raw or b""
+        if len(raw) < 2:
+            return raw
+        try:
+            nd = int(chr(raw[1]))
+        except (ValueError, IndexError):
+            return raw
+        if nd <= 0 or len(raw) < 2 + nd:
+            return raw
+        try:
+            nbytes = int(raw[2 : 2 + nd].decode("ascii"))
+        except Exception:
+            return raw
+        total = 2 + nd + nbytes
+        buf = bytearray(raw)
+        while len(buf) < total:
+            try:
+                more = conn.read_raw()
+            except Exception:
+                break
+            if not more:
+                break
+            buf.extend(more)
+        return bytes(buf[:total]) if len(buf) >= total else bytes(buf)
+
+    def _parse_trace_write_raw_ascii(self, raw: bytes) -> List[float]:
+        """
+        Same as common AQ6317B snapshot scripts: comma-separated ASCII, first field = point
+        count, remaining fields = trace samples (nm or dBm).
+        """
+        data_str = raw.decode("ascii", errors="ignore").strip()
+        parts = [p.strip() for p in data_str.split(",") if p.strip()]
+        if len(parts) < 2:
+            return self._parse_float_list_text(data_str)
+        try:
+            n0 = int(round(float(parts[0])))
+            if len(parts) == n0 + 1:
+                return [float(x) for x in parts[1:]]
+        except (TypeError, ValueError):
+            pass
+        # Fallback: match scripts that always drop the first field
+        try:
+            return [float(x) for x in parts[1:]]
+        except (TypeError, ValueError):
+            return []
+
+    def _read_trace_legacy_write_raw(self, cmd_no_query: str) -> List[float]:
+        """
+        Hardware path used by working snapshot tools: ``write('WDATA')`` / ``write('LDATA')``
+        (no ``?``), then ``read_raw``. Differs from ``WDATA?`` / ``LDATA?`` query responses.
+        """
+        conn = self.gpib_connection
+        if conn is None or not self.is_connected():
+            return []
+        c = str(cmd_no_query or "").strip().upper().rstrip("?")
+        if c not in ("WDATA", "LDATA"):
+            return []
+        try:
+            conn.write(c)
+            time.sleep(0.06)
+            raw = self._read_gpib_full_binary_response(conn)
+            if not raw:
+                return []
+            if raw[0:1] == b"#":
+                floats = self._parse_ieee_block_floats(raw)
+                if floats:
+                    return floats
+            return self._parse_trace_write_raw_ascii(raw)
+        except Exception:
+            return []
 
     def _parse_ieee_block_floats(self, raw: bytes) -> List[float]:
         """Parse optional IEEE 488.2 definite-length binary block of 4-byte floats."""
@@ -503,9 +800,11 @@ class AndoConnection:
         """
         Read wavelength or level trace (WDATA? / LDATA? / WDATB? / LDATB?).
 
-        Ensures REMOTE + WRTA before reads. Tries: full query string parse, PyVISA ascii/binary,
-        raw IEEE block, then **range query** ``WDATA R1-R{n}?`` / ``LDATA R1-R{n}?`` when the
-        full trace query returns empty (common on some GPIB stacks / large payloads).
+        For trace **A**, tries first the same sequence as common bench scripts: ``write('WDATA')`` /
+        ``write('LDATA')`` (no ``?``) then ``read_raw`` — many AQ6317B units return ASCII
+        ``count,value,...`` or an IEEE float block; this differs from ``WDATA?`` / ``LDATA?`` and
+        matches matplotlib snapshot tools. After ``REMOTE``/``SD0``/``TRACE A``/``WRTA``/``DSPA``,
+        falls back to ``DTNUM?``/``SMPL?`` + range queries, then full queries.
         """
         if not self.is_connected() or self.gpib_connection is None:
             return []
@@ -514,9 +813,15 @@ class AndoConnection:
         if not q.endswith("?"):
             q = q + "?"
         base = q.replace("?", "").strip().upper()
-        is_wdata = base.startswith("WDATA")
-        is_ldata = base.startswith("LDATA")
+        # WDATA/WDATB/WDATC share WDAT*; LDATA/LDATB/LDATC share LDAT*
+        is_wdata = base.startswith("WDAT")
+        is_ldata = base.startswith("LDAT")
         old_timeout = getattr(conn, "timeout", 5000)
+
+        def _finalize(vals: List[float], expected_n: Optional[int]) -> List[float]:
+            if not vals:
+                return []
+            return self._strip_leading_count_prefix(vals, expected_n)
 
         def _try_parse_query_string(cmd: str) -> List[float]:
             """Single PyVISA query() then split floats (handles comma/space-separated ASCII)."""
@@ -534,7 +839,7 @@ class AndoConnection:
             if n <= 0:
                 return []
             r = f"R1-R{n}"
-            # Primary: WDATA R1-R501? style
+            # Primary: WDATA R1-R501? style (reference: WDATA R{start}-R{end})
             variants = [
                 f"{base} {r}?",
                 f"{base}? {r}",
@@ -571,7 +876,7 @@ class AndoConnection:
             try:
                 conn.write(cmd.rstrip("\n"))
                 time.sleep(0.08)
-                raw = conn.read_raw()
+                raw = self._read_gpib_full_binary_response(conn)
                 if not raw:
                     txt = conn.read()
                     return self._parse_float_list_text(str(txt))
@@ -583,45 +888,60 @@ class AndoConnection:
                 return []
             return []
 
+        def _range_chunked(total: int) -> List[float]:
+            merged: List[float] = []
+            step = 256
+            start = 1
+            while start <= total:
+                end = min(start + step - 1, total)
+                chunk_cmd = f"{base} R{start}-R{end}?"
+                # Per-chunk count prefix: do not pass total N (would confuse strip vs chunk length).
+                chunk = _finalize(_try_parse_query_string(chunk_cmd), None)
+                if not chunk:
+                    chunk = _finalize(_read_once(chunk_cmd), None)
+                if not chunk:
+                    return []
+                merged.extend(chunk)
+                start = end + 1
+            return merged
+
         self._prepare_trace_read()
         try:
             conn.timeout = max(int(old_timeout), 180000)
-            # 1) Direct Resource.query on full command (often works when query_ascii_values does not)
-            out = _try_parse_query_string(q)
-            if out:
-                return out
-            # 2) PyVISA helpers + raw
-            out = _read_once(q)
-            if out:
-                return out
-            # 3) Point count for range fallback
+            # 0) Snapshot-style: write WDATA/LDATA without "?", then read_raw — matches many AQ6317B
+            #    lab scripts (comma ASCII with leading count, or IEEE block). Differs from WDATA?/LDATA?.
+            if base in ("WDATA", "LDATA"):
+                legacy = self._read_trace_legacy_write_raw(base)
+                legacy = _finalize(legacy, None)
+                if legacy:
+                    return legacy
+
             n = self.query_data_point_count() or self.query_sampling_points()
+
+            # Prefer exact-length range reads when we know N (reference Data Output Commands).
             if n and (is_wdata or is_ldata):
                 for rcmd in _range_variants(n):
-                    out = _try_parse_query_string(rcmd)
-                    if out:
+                    out = _finalize(_try_parse_query_string(rcmd), n)
+                    if len(out) == n:
                         return out
-                    out = _read_once(rcmd if rcmd.endswith("?") else rcmd + "?")
-                    if out:
+                    out = _finalize(
+                        _read_once(rcmd if rcmd.endswith("?") else rcmd + "?"),
+                        n,
+                    )
+                    if len(out) == n:
                         return out
-                    # Chunk if still empty (very long GPIB lines)
-                    if n > 256:
-                        merged: List[float] = []
-                        step = 256
-                        start = 1
-                        while start <= n:
-                            end = min(start + step - 1, n)
-                            chunk_cmd = f"{base} R{start}-R{end}?"
-                            chunk = _try_parse_query_string(chunk_cmd)
-                            if not chunk:
-                                chunk = _read_once(chunk_cmd)
-                            if not chunk:
-                                merged = []
-                                break
-                            merged.extend(chunk)
-                            start = end + 1
-                        if merged:
-                            return merged
+                if n > 256:
+                    merged = _range_chunked(n)
+                    if len(merged) == n:
+                        return merged
+
+            # Full trace query (may be long; some stacks truncate — range path above is preferred).
+            out = _finalize(_try_parse_query_string(q), n)
+            if out:
+                return out
+            out = _finalize(_read_once(q), n)
+            if out:
+                return out
             return []
         except Exception:
             return []

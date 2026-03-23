@@ -4,7 +4,6 @@ Requirements: PyVISA (pyvisa), pyserial (serial). Optional: Thorlabs Kinesis + p
 Imports all instrument modules so one place has everything for the Connection tab:
   arroyo, ando, wavemeter, actuator, prm, thorlabs_powermeter, gentec_powermeter, instrument_manager.
 Use: from instruments.connection import ArroyoConnection, AndoConnection, scan_gpib, scan_visa, ...
-Simulation: instruments/simulation_config.py — simulate_all, or simulate_except_measurement (real PRM/Thorlabs/Gentec).
 """
 from __future__ import annotations
 

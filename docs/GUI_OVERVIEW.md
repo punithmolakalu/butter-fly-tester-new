@@ -13,13 +13,12 @@ main()
   → app.aboutToQuit → viewmodel.shutdown
   → MainWindow(viewmodel)      ← the main UI
   → window.showMaximized()
-  → QTimer.singleShot(0, viewmodel.start_workers)
   → app.exec_()
 ```
 
 - **MainViewModel**: owns all instrument **workers** (threads), connection state, and timers. It does **not** create widgets.
 - **MainWindow**: builds all tabs and widgets, and **binds** to the viewmodel via Qt signals/slots.
-- **start_workers**: starts background threads for Arroyo, Ando, Actuator, Wavemeter, Gentec, Thorlabs, PRM. Instruments are **disconnected** until the user uses the **Connection** tab.
+- Workers start with the viewmodel; instruments stay **disconnected** until the user connects on the **Connection** tab.
 
 ---
 
