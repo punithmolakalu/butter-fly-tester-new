@@ -1,0 +1,108 @@
+{
+    "Recipe_Name": "1550nm DFB Fiber Coupled",
+    "Laser_Type": "DFB",
+    "Wavelength": 1550,
+    "Description": "1550nm DFB laser, fiber coupled – alignment after LIV",
+    "FiberCoupled": true,
+
+    "GENERAL": {
+        "Wavelength": 1550,
+        "Temperature": 25,
+        "Current": 80,
+        "LaserType": "DFB",
+        "PartNumber": "SAMPLE-1550-FC-001",
+        "BatchNumber": "BATCH-2026-001",
+        "FiberCoupled": true,
+        "TestSequence": ["LIV", "PER", "Spectrum", "WLvsTemp", "Temperature Stability 1", "Temperature Stability 2"]
+    },
+
+    "OPERATIONS": {
+        "LIV": {
+            "min_current_mA": 0,
+            "max_current_mA": 100,
+            "increment_mA": 2,
+            "wait_time_ms": 50,
+            "Temperature": 25,
+            "rated_current_mA": 80,
+            "rated_power_mW": 10,
+            "threshold_method": "max_slope",
+            "se_data_points": 10,
+            "FiberCoupled": true
+        },
+        "PER": {
+            "Temperature": 25,
+            "Current": 80,
+            "StartAngle": 0,
+            "TravelDistance": 180,
+            "Wavelength": 1550,
+            "StepsPerDegree": 10,
+            "WaitTimeMs": 50,
+            "MinPER_dB": 25
+        },
+        "SPECTRUM": {
+            "Current": 80,
+            "Temperature": 25,
+            "CenterWL": 1550,
+            "Span": 5,
+            "Resolution": 0.05,
+            "Sampling": 0.02,
+            "Sensitivity": "HIGH1",
+            "UseRatedPower": false,
+            "SMSR_Min_dB": 35,
+            "FWHM_Max_nm": 0.2
+        },
+        "Lambda Vs Temp": {
+            "MINTemp": 15,
+            "MAXTemp": 45,
+            "INC": 5,
+            "WAIT TIME": 500,
+            "Set Curr": 80,
+            "Timeout_s": 60,
+            "TempTolerance": 0.5
+        },
+        "Temperature Stability 1": {
+            "Current": 60,
+            "MinTemp": 15,
+            "MaxTemp": 35,
+            "TempIncrement": 5,
+            "StabilizationTime_s": 30,
+            "MeasurementDuration_s": 60,
+            "WavelengthTolerance_nm": 0.2
+        },
+        "Temperature Stability 2": {
+            "Current": 80,
+            "MinTemp": 35,
+            "MaxTemp": 55,
+            "TempIncrement": 5,
+            "StabilizationTime_s": 30,
+            "MeasurementDuration_s": 60,
+            "WavelengthTolerance_nm": 0.2
+        }
+    },
+
+    "TEST_SEQUENCE": [
+        "LIV",
+        "PER",
+        "Spectrum",
+        "Lambda Vs Temp",
+        "Temperature Stability 1",
+        "Temperature Stability 2"
+    ],
+
+    "PASS_FAIL_CRITERIA": {
+        "LIV": {
+            "min_threshold_mA": 5,
+            "max_threshold_mA": 20,
+            "min_slope_efficiency": 0.4,
+            "max_slope_efficiency": 1.2
+        },
+        "PER": {
+            "min_PER_dB": 25
+        },
+        "SPECTRUM": {
+            "min_SMSR_dB": 35,
+            "max_FWHM_nm": 0.2,
+            "wavelength_tolerance_nm": 2
+        }
+    }
+}

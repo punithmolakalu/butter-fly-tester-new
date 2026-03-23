@@ -1,0 +1,13 @@
+# Example: what the console prints during a PER run (when PER_TERMINAL_SAMPLES is on, default).
+
+[PER] Pre-check   angle = 0.0000 deg   Thorlabs = 1.234e-03 mW
+[PER] --- sweep samples (continuous): index | angle (deg) | Thorlabs (mW) ---
+[PER]     1  angle =     0.0120 deg   Thorlabs =    1.24e-03 mW   (sweep)
+[PER]     2  angle =     0.5230 deg   Thorlabs =    1.31e-03 mW   (sweep)
+[PER]     3  angle =     1.0410 deg   Thorlabs =    1.45e-03 mW   (sweep)
+# ... one line per valid Thorlabs + PRM read ...
+[PER] --- end sweep: 342 samples ---
+[PER] Summary  samples=342  PER=12.456 dB  at_max_angle=45.1200 deg  P_min=8.2e-05 mW  P_max=1.95e-03 mW
+
+# Step-scan fallback uses (step) instead of (sweep) in the last column.
+# To turn off terminal lines: set environment variable  PER_TERMINAL_SAMPLES=0

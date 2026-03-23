@@ -1,0 +1,74 @@
+{
+    "Recipe_Name": "1064nm LIV only",
+    "FiberCoupled": true,
+    "Wavelength": 1064.0,
+    "GENERAL": {
+        "RecipeName": "1064nm LIV only",
+        "Comments": "1064nm LIV test only. Use with Arroyo, Ando, Gentec, Thorlabs only.",
+        "NumTests": 1,
+        "TestSequence": [
+            "LIV"
+        ],
+        "FiberCoupled": true,
+        "Wavelength": 1064.0,
+        "FPPath": false,
+        "SavePath": ""
+    },
+    "OPERATIONS": {
+        "LIV": {
+            "min_current_mA": 400.0,
+            "max_current_mA": 1200.0,
+            "increment_mA": 10.0,
+            "wait_time_ms": 50.0,
+            "temperature": 25,
+            "multiplier": 0,
+            "rated_current_mA": 1350.0,
+            "rated_power_mW": 100.0,
+            "se_data_points": 10
+        },
+        "PER": {
+            "meas_speed": "",
+            "setup_speed": "",
+            "start_angle": "",
+            "travel_distance": "",
+            "actuator_speed": "",
+            "actuator_distance": ""
+        },
+        "SPECTRUM": {
+            "current": 0,
+            "resolution_nm": 0.01,
+            "average": 1,
+            "sampling": 500,
+            "center_nm": 1064.0,
+            "span_nm": 0.0,
+            "ref_level_dBm": -10.0,
+            "level_scale": 0.0,
+            "temperature": 25,
+            "wavelength": 1064.0,
+            "analysis": "DFB-LD",
+            "sensitivity": "Medium",
+            "active_trace": "TraceA",
+            "air_vac": "Air",
+            "pulse_cw": "Pulse",
+            "range_switch": "Center&Span",
+            "auto_analysis": false,
+            "use_current_rated_power": false,
+            "wl_shift": 0,
+            "threshold": 0,
+            "mode_fit": "OFF",
+            "auto_ref_level": false
+        },
+        "WAVEMETER": {
+            "wavelength_range": "480nm - 1000nm",
+            "function": "LASER",
+            "resolution": "0.001nm",
+            "sample_mode": "RUN",
+            "averaging": "OFF"
+        },
+        "STABILITY": {
+            "temperature": 25,
+            "current": 0,
+            "duration_minutes": 60
+        }
+    }
+}

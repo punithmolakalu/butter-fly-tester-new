@@ -1,0 +1,78 @@
+{
+    "FiberCoupled": true,
+    "Wavelength": "1064",
+    "GENERAL": {
+        "RecipeName": "1064nm_Spectrum_only",
+        "Comments": "1064 nm — Spectrum step only (Ando OSA + Wavemeter + Arroyo TEC/laser). Connect all three before Run.",
+        "NumTests": 1,
+        "TestSequence": [
+            "Spectrum"
+        ],
+        "FiberCoupled": true,
+        "Wavelength": "1064",
+        "FPPath": false,
+        "SavePath": ""
+    },
+    "OPERATIONS": {
+        "LIV": {
+            "min_current_mA": 0.0,
+            "max_current_mA": 1500.0,
+            "increment_mA": 0.0,
+            "wait_time_ms": 0.0,
+            "temperature": 25,
+            "multiplier": 0,
+            "rated_current_mA": 0.0,
+            "rated_power_mW": 0.0,
+            "se_data_points": 0
+        },
+        "SPECTRUM": {
+            "current": 1350,
+            "resolution_nm": 0.1,
+            "average": 1,
+            "sampling": 501,
+            "center_nm": 1064.0,
+            "span_nm": 10.0,
+            "ref_level_dBm": -10.0,
+            "level_scale": 10.0,
+            "temperature": 25,
+            "wavelength": 1064.0,
+            "analysis": "DFB-LD",
+            "sensitivity": "Medium",
+            "active_trace": "TraceA",
+            "air_vac": "Air",
+            "pulse_cw": "CW",
+            "range_switch": "Center&Span",
+            "auto_analysis": false,
+            "use_current_rated_power": false,
+            "wl_shift": 0,
+            "threshold": 0,
+            "mode_fit": "OFF",
+            "auto_ref_level": false,
+            "SMSR_Min_dB": 25,
+            "FWHM_Max_nm": 2
+        },
+        "WAVEMETER": {
+            "wavelength_range": "1000nm - 1650nm",
+            "function": "LASER",
+            "resolution": "0.001nm",
+            "sample_mode": "RUN",
+            "averaging": "OFF",
+            "smsr": false
+        },
+        "STABILITY": {
+            "temperature": 25,
+            "current": 0,
+            "duration_minutes": 60
+        }
+    },
+    "PASS_FAIL_CRITERIA": {
+        "SPECTRUM": {
+            "min_SMSR_dB": 25,
+            "max_FWHM_nm": 2,
+            "wavelength_tolerance_nm": 5
+        }
+    },
+    "TEST_SEQUENCE": [
+        "Spectrum"
+    ]
+}

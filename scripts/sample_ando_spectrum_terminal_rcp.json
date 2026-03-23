@@ -1,0 +1,56 @@
+{
+    "FiberCoupled": true,
+    "Wavelength": "1064",
+    "GENERAL": {
+        "RecipeName": "terminal_test_spectrum_1064",
+        "Comments": "1064 nm, 2 nm span, 0.01 nm res, Mid, DFB-LD, auto ref — scripts/ando_wdata_ldata_terminal_test.py",
+        "NumTests": 1,
+        "TestSequence": ["Spectrum"],
+        "FiberCoupled": true,
+        "Wavelength": "1064",
+        "FPPath": false,
+        "SavePath": ""
+    },
+    "OPERATIONS": {
+        "SPECTRUM": {
+            "current": 50,
+            "resolution_nm": 0.01,
+            "average": 1,
+            "sampling": 501,
+            "center_nm": 1064.0,
+            "span_nm": 2.0,
+            "ref_level_dBm": -10.0,
+            "level_scale": 10.0,
+            "temperature": 25,
+            "wavelength": 1064.0,
+            "analysis": "DFB-LD",
+            "sensitivity": "Medium",
+            "active_trace": "TraceA",
+            "air_vac": "Air",
+            "pulse_cw": "CW",
+            "range_switch": "Center&Span",
+            "auto_analysis": false,
+            "use_current_rated_power": false,
+            "wl_shift": 0,
+            "threshold": 0,
+            "mode_fit": "OFF",
+            "auto_ref_level": true
+        },
+        "WAVEMETER": {
+            "wavelength_range": "1000nm - 1650nm",
+            "function": "LASER",
+            "resolution": "0.001nm",
+            "sample_mode": "RUN",
+            "averaging": "OFF",
+            "smsr": false
+        }
+    },
+    "PASS_FAIL_CRITERIA": {
+        "SPECTRUM": {
+            "min_SMSR_dB": 25,
+            "max_FWHM_nm": 2,
+            "wavelength_tolerance_nm": 5
+        }
+    },
+    "TEST_SEQUENCE": ["Spectrum"]
+}
