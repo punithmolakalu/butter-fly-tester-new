@@ -12,7 +12,7 @@
     "PartNumber": "SAMPLE-1064-001",
     "BatchNumber": "BATCH-2026-001",
     "FiberCoupled": true,
-    "TestSequence": ["LIV", "PER", "Spectrum", "Lambda Vs Temp", "Temperature Stability 1", "Temperature Stability 2"]
+    "TestSequence": ["LIV", "PER", "Spectrum", "Lambda Vs Temp"]
   },
   "OPERATIONS": {
     "LIV": {
@@ -58,32 +58,12 @@
       "Timeout_s": 60,
       "TempTolerance": 0.5
     },
-    "Temperature Stability 1": {
-      "Current": 1100,
-      "MinTemp": 15,
-      "MaxTemp": 35,
-      "TempIncrement": 5,
-      "StabilizationTime_s": 30,
-      "MeasurementDuration_s": 60,
-      "WavelengthTolerance_nm": 1
-    },
-    "Temperature Stability 2": {
-      "Current": 1350,
-      "MinTemp": 35,
-      "MaxTemp": 55,
-      "TempIncrement": 5,
-      "StabilizationTime_s": 30,
-      "MeasurementDuration_s": 60,
-      "WavelengthTolerance_nm": 1
-    }
   },
   "TEST_SEQUENCE": [
     "LIV",
     "PER",
     "Spectrum",
-    "Lambda Vs Temp",
-    "Temperature Stability 1",
-    "Temperature Stability 2"
+    "Lambda Vs Temp"
   ],
   "PASS_FAIL_CRITERIA": {
     "LIV": {

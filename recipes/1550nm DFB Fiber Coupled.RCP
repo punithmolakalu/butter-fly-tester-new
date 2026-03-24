@@ -4,14 +4,11 @@
     "GENERAL": {
         "RecipeName": "1550nm DFB Fiber Coupled",
         "Comments": "1550nm DFB laser, fiber coupled \u00e2\u20ac\u201c alignment after LIV",
-        "NumTests": 6,
+        "NumTests": 3,
         "TestSequence": [
             "LIV",
             "PER",
-            "Spectrum",
-            "",
-            "Temperature Stability 1",
-            "Temperature Stability 2"
+            "Spectrum"
         ],
         "FiberCoupled": true,
         "Wavelength": "1550",
@@ -69,11 +66,6 @@
             "sample_mode": "RUN",
             "averaging": "OFF",
             "smsr": true
-        },
-        "STABILITY": {
-            "temperature": 25,
-            "current": 80,
-            "duration_minutes": 60
         }
     }
 }

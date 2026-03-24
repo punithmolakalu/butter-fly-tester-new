@@ -1,5 +1,5 @@
-# Temperature stability recipe step (TEC ramp + Ando metrics).
-from .stability import (
+"""Temperature stability test (TEC sweep + Ando metrics + Part B pass/fail)."""
+from operations.stability.stability_process import (
     TemperatureStabilityParameters,
     TemperatureStabilityProcess,
     TemperatureStabilityProcessResult,

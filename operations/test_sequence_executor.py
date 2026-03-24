@@ -9,6 +9,12 @@ import sys
 import threading
 from typing import Any, List, Optional
 
+try:
+    from operations.stability.stability_process import TemperatureStabilityParameters, TemperatureStabilityProcess
+except ImportError:
+    TemperatureStabilityProcess = None  # type: ignore
+    TemperatureStabilityParameters = None  # type: ignore
+
 # Full LIV process (sweep + Thorlabs + pass/fail + executor callbacks)
 try:
     from operations.LIV.liv_core import LIVMain, LIVMainParameters, LIVProcessResult
@@ -26,6 +32,16 @@ from operations.arroyo_laser_helpers import (
     per_keep_laser_on_after_step,
     spectrum_keep_laser_on_after_step,
 )
+
+
+def _stability_slot_from_test_name(name: str) -> Optional[int]:
+    """Map TEST_SEQUENCE label to slot 1 or 2 (Temperature Stability 1 / 2)."""
+    t = (name or "").strip().upper()
+    if "STABILITY 2" in t or t == "TS2":
+        return 2
+    if "STABILITY 1" in t or t == "TS1":
+        return 1
+    return None
 
 try:
     # Actual path: operations/per/PER_PROCESS.py (lowercase package, uppercase module name)
@@ -46,37 +62,15 @@ except ImportError:
         SpectrumProcess = None  # type: ignore
         SpectrumProcessParameters = None  # type: ignore
 
-try:
-    from operations.stability.stability import TemperatureStabilityProcess
-except ImportError:
-    TemperatureStabilityProcess = None  # type: ignore[misc, assignment]
-
-
-def _temperature_stability_plot_slot(step_name: str) -> int:
-    s = (step_name or "").strip().lower()
-    return 2 if "stability 2" in s or s.endswith("2") else 1
-
-
-def _is_temperature_stability_step_name(name: str) -> bool:
-    u = (name or "").strip().upper()
-    if u in ("TEMPERATURE STABILITY 1", "TEMPERATURE STABILITY 2"):
-        return True
-    return u.startswith("TEMPERATURE STABILITY") and ("1" in u or "2" in u)
-
-
 class TestSequenceExecutor(QObject):
     log_message = pyqtSignal(str)
     # Step-specific process logs (secondary-monitor windows only; not Main tab status log).
     liv_log_message = pyqtSignal(str)
     per_log_message = pyqtSignal(str)
     spectrum_log_message = pyqtSignal(str)
-    stability_log_message = pyqtSignal(str)
     liv_test_result = pyqtSignal(object)
     per_test_result = pyqtSignal(object, object, object)  # result, angles, powers_mw
     spectrum_test_result = pyqtSignal(object)
-    stability_test_result = pyqtSignal(object)
-    stability_process_window_requested = pyqtSignal(dict)  # step_name, recipe — secondary-monitor window
-    stability_step_finished = pyqtSignal(object)  # final TemperatureStabilityProcessResult — main tab + close window
     test_window_requested = pyqtSignal(str, dict)
     liv_process_window_requested = pyqtSignal(dict)
     connect_fiber_before_liv_requested = pyqtSignal(str)
@@ -91,6 +85,9 @@ class TestSequenceExecutor(QObject):
     spectrum_live_trace = pyqtSignal(object, object)  # wdata, ldata (Ando trace; worker thread → UI)
     spectrum_wavemeter_reading = pyqtSignal(object)  # wavelength nm or None
     spectrum_step_status = pyqtSignal(str)  # first/second sweep status for Spectrum window + log
+    stability_log_message = pyqtSignal(str)
+    stability_live_point = pyqtSignal(float, float, float, float)  # T °C, FWHM nm, SMSR dB, peak nm
+    stability_test_result = pyqtSignal(object)
     # Step name + list of reason strings for Main tab "Reason for Failure" (worker thread → UI).
     sequence_step_failed = pyqtSignal(str, object)
 
@@ -110,6 +107,8 @@ class TestSequenceExecutor(QObject):
         self._connect_fiber_ack: Optional[bool] = None
         self._alignment_condition = threading.Condition()
         self._alignment_ack: Optional[bool] = None
+        # Which Temperature Stability slot (1/2) is running — used by Plot tab live mirror.
+        self._stability_live_slot: Optional[int] = None
 
     def set_test_sequence(self, test_sequence: Any, recipe: Any) -> None:
         if isinstance(test_sequence, (list, tuple)):
@@ -117,6 +116,15 @@ class TestSequenceExecutor(QObject):
         else:
             self._test_sequence = []
         self._recipe = recipe
+        # Same normalization as load_recipe_file: hoist TEMP STABILITY blocks into OPERATIONS,
+        # copy Wavelength → SPECTRUM center when needed — so Run uses the same dict as New Recipe + RCP tab.
+        if isinstance(self._recipe, dict):
+            try:
+                from operations.recipe_normalize import normalize_loaded_recipe
+
+                normalize_loaded_recipe(self._recipe)
+            except Exception:
+                pass
 
     def set_sequence_bridge(self, bridge: Any) -> None:
         self._bridge = bridge
@@ -191,8 +199,10 @@ class TestSequenceExecutor(QObject):
 
         all_passed = True
         recipe = self._recipe if isinstance(self._recipe, dict) else {}
-        # If TEST_SEQUENCE lists TS1 then TS2, skip TS2 when TS1 fails.
-        prev_ts1_passed: Optional[bool] = None
+
+        seq_list = [str(x) for x in self._test_sequence]
+        ts1_in_sequence = any(_stability_slot_from_test_name(x) == 1 for x in seq_list)
+        ts1_passed: Optional[bool] = None
 
         for test_name in self._test_sequence:
             if self._stop_requested:
@@ -201,6 +211,24 @@ class TestSequenceExecutor(QObject):
                 return False
             name_upper = (test_name or "").strip().upper()
             if not name_upper:
+                continue
+            stab_slot = _stability_slot_from_test_name(str(test_name))
+            if stab_slot is not None:
+                if stab_slot == 2 and ts1_in_sequence and ts1_passed is False:
+                    self.log_message.emit("Temperature Stability 2 skipped (Temperature Stability 1 did not pass).")
+                    self._emit_step_failed(
+                        str(test_name),
+                        ["Temperature Stability 2 skipped because Temperature Stability 1 did not pass."],
+                    )
+                    all_passed = False
+                    continue
+                self.stability_log_message.emit("Starting {}…".format(test_name))
+                step_ok = self._run_temperature_stability(recipe, stab_slot, str(test_name))
+                if stab_slot == 1:
+                    ts1_passed = step_ok
+                if not step_ok:
+                    all_passed = False
+                self.stability_log_message.emit("{} completed.".format(test_name))
                 continue
             if name_upper == "LIV":
                 self.liv_log_message.emit("Starting LIV test…")
@@ -220,18 +248,6 @@ class TestSequenceExecutor(QObject):
                 if not step_ok:
                     all_passed = False
                 self.spectrum_log_message.emit("Spectrum test completed.")
-            elif name_upper == "STABILITY":
-                self.stability_log_message.emit("Starting Temperature Stability sequence…")
-                step_ok = self._run_temperature_stability_sequence(recipe)
-                if not step_ok:
-                    all_passed = False
-                self.stability_log_message.emit("Temperature Stability sequence completed.")
-            elif _is_temperature_stability_step_name(test_name):
-                self.stability_log_message.emit("Starting {}…".format(test_name.strip()))
-                step_ok = self._run_temperature_stability_step(recipe, test_name.strip())
-                if not step_ok:
-                    all_passed = False
-                self.stability_log_message.emit("{} completed.".format(test_name.strip()))
             else:
                 self.log_message.emit(f"Test {test_name} not implemented.")
                 self._emit_step_failed(
@@ -526,89 +542,86 @@ class TestSequenceExecutor(QObject):
             if mw is not None and hasattr(mw, "resumePollingAfterLiv"):
                 QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", Qt.BlockingQueuedConnection)
 
-    def _run_temperature_stability_step(self, recipe: Any, step_name: str) -> bool:
-        if TemperatureStabilityProcess is None:
-            self.log_message.emit("Temperature Stability module not available.")
-            self._emit_step_failed(step_name, ["Temperature Stability module failed to import."])
+    def _run_temperature_stability(self, recipe: Any, slot: int, step_name: str) -> bool:
+        if TemperatureStabilityProcess is None or TemperatureStabilityParameters is None:
+            self.log_message.emit("Temperature stability module not available.")
+            self._emit_step_failed(step_name, ["Temperature stability module not available (import failed)."])
             return False
         bridge = self._bridge
         if bridge is None:
-            self._emit_step_failed(step_name, ["Internal error: no sequence bridge for Temperature Stability."])
+            self._emit_step_failed(step_name, ["Internal error: no sequence bridge for temperature stability."])
             return False
         arroyo = bridge.get_arroyo()
         ando = bridge.get_instrument("Ando")
+        recipe_dict = recipe if isinstance(recipe, dict) else {}
         if arroyo is None or not getattr(arroyo, "is_connected", lambda: False)():
+            self.stability_log_message.emit("Temperature stability requires Arroyo connected.")
             self._emit_step_failed(
                 step_name,
-                ["Arroyo is not connected — connect Arroyo in the Connection tab."],
+                ["Arroyo is not connected — connect the laser/TEC controller in the Connection tab."],
             )
             return False
         if ando is None or not getattr(ando, "is_connected", lambda: False)():
+            self.stability_log_message.emit("Temperature stability requires Ando (OSA) connected.")
             self._emit_step_failed(
                 step_name,
                 ["Ando is not connected — connect the optical spectrum analyzer in the Connection tab."],
             )
             return False
-        recipe_dict = recipe if isinstance(recipe, dict) else {}
+
+        params_obj = TemperatureStabilityParameters.from_recipe_blocks(recipe_dict, slot)
         try:
-            self.stability_process_window_requested.emit(
-                {"step_name": step_name, "recipe": recipe_dict}
-            )
+            import dataclasses
+
+            pr_dict = dataclasses.asdict(params_obj)
         except Exception:
-            pass
+            pr_dict = {}
+        self._stability_window_params_pending = {"slot": slot, "params": pr_dict, "step_name": step_name}
+
         mw = getattr(self, "main_window", None)
+        if mw is not None:
+            QMetaObject.invokeMethod(
+                mw,
+                "blocking_open_stability_test_window",
+                Qt.BlockingQueuedConnection,
+            )
+        else:
+            self.stability_log_message.emit("No main window — cannot open stability secondary window.")
+
         if mw is not None and hasattr(mw, "pausePollingForLiv"):
             QMetaObject.invokeMethod(mw, "pausePollingForLiv", Qt.BlockingQueuedConnection)
+        self._stability_live_slot = int(slot)
         try:
             proc = TemperatureStabilityProcess()
             proc.set_instruments(arroyo=arroyo, ando=ando)
-            slot = _temperature_stability_plot_slot(step_name)
             result = proc.run(
                 recipe_dict,
                 self,
+                slot,
                 stop_requested=lambda: bool(getattr(self, "_stop_requested", False)),
-                step_name=step_name,
-                plot_slot=slot,
+                step_label=step_name,
             )
             if result.fail_reasons:
                 self._emit_step_failed(step_name, list(result.fail_reasons))
-            try:
-                self.stability_step_finished.emit(result)
-            except Exception:
-                pass
             return bool(result.passed)
         except Exception as e:
-            self.stability_log_message.emit("Temperature Stability error: {}".format(e))
-            self._emit_step_failed(step_name, ["Temperature Stability error: {}".format(e)])
+            self.stability_log_message.emit("Temperature stability error: {}".format(e))
+            self._emit_step_failed(step_name, ["Temperature stability error: {}".format(e)])
             return False
         finally:
+            try:
+                if spectrum_keep_laser_on_after_step(recipe_dict):
+                    self.stability_log_message.emit(
+                        "Stability: Arroyo laser left ON (keep_laser_on_after / BF_SPECTRUM_KEEP_LASER_ON)."
+                    )
+                else:
+                    arroyo_laser_off(arroyo)
+                    self.stability_log_message.emit("Stability: Arroyo laser output OFF (step ended).")
+            except Exception:
+                pass
             if mw is not None and hasattr(mw, "resumePollingAfterLiv"):
                 QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", Qt.BlockingQueuedConnection)
-
-    def _run_temperature_stability_sequence(self, recipe: Any) -> bool:
-        """Run Temperature Stability 1 then 2 when TEST_SEQUENCE contains STABILITY only."""
-        op = (recipe.get("OPERATIONS") or recipe.get("operations") or {}) if isinstance(recipe, dict) else {}
-        steps: List[str] = []
-        for key in ("Temperature Stability 1", "Temperature Stability 2"):
-            if key in op and isinstance(op.get(key), dict):
-                steps.append(key)
-        if not steps:
-            self._emit_step_failed(
-                "STABILITY",
-                [
-                    "No Temperature Stability 1/2 block found in OPERATIONS. "
-                    "Add OPERATIONS['Temperature Stability 1'] (and optionally 2) to the recipe.",
-                ],
-            )
-            return False
-        all_ok = True
-        for sn in steps:
-            if self._stop_requested:
-                return False
-            if not self._run_temperature_stability_step(recipe, sn):
-                all_ok = False
-                break
-        return all_ok
+            self._stability_live_slot = None
 
 
 class TestSequenceThread(QThread):

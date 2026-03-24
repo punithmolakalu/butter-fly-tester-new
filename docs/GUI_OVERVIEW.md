@@ -34,7 +34,6 @@ The main window is a **tabbed** interface. Tabs are created in `MainWindow.__ini
 | **LIV** | LIV graph (power/voltage/PD) — updated when LIV runs |
 | **PER** | PER graph |
 | **Spectrum** | Spectrum graph |
-| **Temperature Stability** | Stability graph |
 | **Summary** | Summary values |
 | **Result** | Placeholder |
 | **Connection** | **Scan All**, **Connect All**, Save; per-instrument scan/connect/disconnect (Arroyo, Actuator, Ando, Wavemeter, PRM, Gentec, Thorlabs) |
@@ -93,7 +92,7 @@ When the user clicks **Run**:
    - **liv_process_window_requested** → open **LIV Process** window (after laser is on)
    - **liv_pre_start_prompt_requested** → show a message box; when user clicks OK, the executor is **acknowledged** so the LIV thread can continue (e.g. “Connect fiber to Thorlabs meter”).
    - **alignment_window_requested** → open **Alignment** window (same as Align button) for LIV alignment step.
-   - Similarly for PER, Spectrum, Stability results and test windows if present.
+   - Similarly for PER, Spectrum results and test windows if present.
 
 4. **TestSequenceThread.start()** is called. The thread runs the executor’s **run** (or `run_blocking_in_worker_thread` in a full implementation), which runs each test in sequence (e.g. LIV, then PER). For **LIV**, the executor uses **SequenceInstrumentBridge** to get Arroyo, Gentec, Thorlabs, Actuator, Ando and passes them into the LIV process (`liv_core.LIVMain`). During LIV, the bridge **pauses** viewmodel polling timers so the LIV thread has exclusive use of serial/VISA.
 

@@ -83,6 +83,21 @@ GROUP_MARGINS = (15, 20, 15, 15)
 INPUT_WIDTH = 120
 INPUT_WIDTH_WIDE = 150
 
+# Not exposed in TEMP STABILITY UI; merged with loaded slot backup on save so Run still works.
+_TS_RECIPE_DEFAULTS = {
+    "FWHM_recovery_threshold_nm": 0.3,
+    "StabilityResolution_nm": 0.05,
+    "auto_ref_level": True,
+    "Analysis": "DFB-LD",
+    "MaxRetries": 5,
+    "TecTolerance_C": 0.5,
+    "TecSettleTimeout_s": 300.0,
+    "PreamblePause_s": 2.0,
+    "delta_wl_per_c_enable": False,
+    "delta_wl_per_c_min": -1.0,
+    "delta_wl_per_c_max": 1.0,
+}
+
 
 class RecipeWindow(QMainWindow):
     """Emitted with absolute path after SAVE writes the file (main Recipe tab reloads from disk)."""
@@ -152,6 +167,7 @@ class RecipeWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(8)
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         top_frame = QFrame()
         top_layout = QHBoxLayout(top_frame)
@@ -188,7 +204,7 @@ class RecipeWindow(QMainWindow):
         self._create_per_tab()
         self._create_liv_tab()
         self._create_spectrum_tab()
-        self._create_temp_stability_tab()
+        self._create_temperature_stability_tab()
 
     def _create_general_tab(self):
         gen_tab = QWidget()
@@ -196,6 +212,7 @@ class RecipeWindow(QMainWindow):
         gen_layout = QVBoxLayout(gen_tab)
         gen_layout.setContentsMargins(15, 15, 15, 15)
         gen_layout.setSpacing(GROUP_SPACING)
+        gen_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         browse_frame = QFrame()
         browse_layout = QHBoxLayout(browse_frame)
         browse_label = QLabel("BROWSE")
@@ -270,7 +287,6 @@ class RecipeWindow(QMainWindow):
         self.smsrCheckBox.setChecked(False)
         self._apply_font_to_widget(self.smsrCheckBox, 'label')
         seq_header_layout.addWidget(self.smsrCheckBox)
-        seq_header_layout.addStretch()
         rcp_gen_layout.addLayout(seq_header_layout)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -289,24 +305,7 @@ class RecipeWindow(QMainWindow):
         self._update_test_sequence()
 
     def _normalize_sequence(self, sequence: list) -> list:
-        out = list(sequence)
-        i = 0
-        while i < len(out):
-            if out[i] in ("Temperature Stability 1", "Temperature Stability 2"):
-                if "Spectrum" not in out[:i]:
-                    out.insert(i, "Spectrum")
-                    i += 1
-            i += 1
-        i = 0
-        while i < len(out) - 1:
-            if out[i] == "Temperature Stability 1" and out[i + 1] == "Temperature Stability 1":
-                out.pop(i + 1)
-                continue
-            if out[i] == "Temperature Stability 2" and out[i + 1] == "Temperature Stability 2":
-                out.pop(i + 1)
-                continue
-            i += 1
-        return out
+        return list(sequence)
 
     def _update_test_sequence(self):
         num = self.numTestsSpin.value()
@@ -344,8 +343,15 @@ class RecipeWindow(QMainWindow):
                             w = nested.widget()
                             if w:
                                 w.deleteLater()
-        test_options = ["LIV", "PER", "Spectrum", "WLvsTemp", "WLvsCurrent",
-                        "Temperature Stability 1", "Temperature Stability 2", "Stability"]
+        test_options = [
+            "LIV",
+            "PER",
+            "Spectrum",
+            "Temperature Stability 1",
+            "Temperature Stability 2",
+            "WLvsTemp",
+            "WLvsCurrent",
+        ]
         ITEMS_PER_COLUMN = 7
         columns = []
         num_columns = (num + ITEMS_PER_COLUMN - 1) // ITEMS_PER_COLUMN
@@ -378,12 +384,12 @@ class RecipeWindow(QMainWindow):
         main_row_layout = QHBoxLayout()
         main_row_layout.setContentsMargins(0, 0, 0, 0)
         main_row_layout.setSpacing(20)
+        main_row_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         for col_layout in columns:
             col_widget = QWidget()
             col_widget.setLayout(col_layout)
             col_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             main_row_layout.addWidget(col_widget, 0, Qt.AlignmentFlag.AlignTop)
-        main_row_layout.addStretch()
         self.seqLayout.addLayout(main_row_layout)
         for i, combo in enumerate(self.test_sequence_combos):
             combo.currentIndexChanged.connect(lambda new_index, idx=i: self._on_sequence_combo_changed(idx))
@@ -393,20 +399,6 @@ class RecipeWindow(QMainWindow):
             return
         if index >= len(self.test_sequence_combos):
             return
-        current = self.test_sequence_combos[index].currentText()
-        if current not in ("Temperature Stability 1", "Temperature Stability 2"):
-            return
-        sequence = [c.currentText() if c.currentText() else "" for c in self.test_sequence_combos]
-        if "Spectrum" in sequence[:index]:
-            return
-        new_sequence = sequence[:index] + ["Spectrum"] + sequence[index:]
-        self.saved_selections = {i: new_sequence[i] for i in range(len(new_sequence))}
-        self._suppress_sequence_rule = True
-        try:
-            self.numTestsSpin.setValue(len(new_sequence))
-            self._update_test_sequence()
-        finally:
-            self._suppress_sequence_rule = False
 
     def _create_per_tab(self):
         per_tab = QWidget()
@@ -414,8 +406,7 @@ class RecipeWindow(QMainWindow):
         per_layout = QHBoxLayout(per_tab)
         per_layout.setContentsMargins(15, 15, 15, 15)
         per_layout.setSpacing(15)
-        per_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        per_layout.addStretch(1)
+        per_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         center_widget = QWidget()
         center_layout = QHBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -464,7 +455,6 @@ class RecipeWindow(QMainWindow):
         act_layout.addRow("Distance:", self.actDistEdit)
         center_layout.addWidget(act_group, 0)
         per_layout.addWidget(center_widget, 0)
-        per_layout.addStretch(1)
         self.tabWidget.addTab(per_tab, "PER")
 
     def _create_liv_tab(self):
@@ -473,7 +463,7 @@ class RecipeWindow(QMainWindow):
         liv_layout = QHBoxLayout(liv_tab)
         liv_layout.setContentsMargins(15, 15, 15, 15)
         liv_layout.setSpacing(15)
-        liv_layout.addStretch(1)
+        liv_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         left_column = QWidget()
         left_layout = QVBoxLayout(left_column)
         left_layout.setSpacing(GROUP_SPACING)
@@ -565,7 +555,6 @@ class RecipeWindow(QMainWindow):
         right_layout.addWidget(criteria_group)
         right_layout.addStretch()
         liv_layout.addWidget(right_column, 0)
-        liv_layout.addStretch(1)
         self.tabWidget.addTab(liv_tab, "LIV")
 
     def _create_spectrum_tab(self):
@@ -573,6 +562,7 @@ class RecipeWindow(QMainWindow):
         spec_tab.setStyleSheet(RECIPE_TAB_STYLESHEET)
         spec_layout = QVBoxLayout(spec_tab)
         spec_layout.setContentsMargins(5, 5, 5, 5)
+        spec_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         spec_notebook = QTabWidget()
         ando_tab = self._create_ando_settings_tab()
         spec_notebook.addTab(ando_tab, "Ando Settings")
@@ -581,12 +571,236 @@ class RecipeWindow(QMainWindow):
         spec_layout.addWidget(spec_notebook)
         self.tabWidget.addTab(spec_tab, "SPECTRUM")
 
+    def _create_temperature_stability_tab(self):
+        """OPERATIONS['Temperature Stability 1'] and ['Temperature Stability 2'] — matches stability_process recipe keys."""
+        self._ts_slot_widgets = {1: {}, 2: {}}
+        # Full OPERATIONS block last loaded per slot (preserves keys not shown in the minimal UI).
+        self._ts_slot_backup = {1: {}, 2: {}}
+        outer = QWidget()
+        outer.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        lay = QVBoxLayout(outer)
+        lay.setContentsMargins(5, 5, 5, 5)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        vl = QVBoxLayout(inner)
+        vl.setContentsMargins(8, 8, 8, 8)
+        vl.setSpacing(16)
+        vl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+
+        title1 = QLabel("Temperature Stability 1")
+        title1.setStyleSheet("font-weight: bold; font-size: 14px; color: #FFFFFF;")
+        vl.addWidget(title1)
+        vl.addWidget(self._build_ts_stability_panel(1))
+
+        title2 = QLabel("Temperature Stability 2")
+        title2.setStyleSheet("font-weight: bold; font-size: 14px; color: #FFFFFF;")
+        vl.addWidget(title2)
+        row2 = QHBoxLayout()
+        row2.setSpacing(12)
+        row2.addWidget(self._build_ts_stability_panel(2), 1)
+        ts2_note = QLabel(
+            "Temperature Stability 2 will only run if Temperature Stability 1 passes."
+        )
+        ts2_note.setWordWrap(True)
+        ts2_note.setStyleSheet("color: #CCCCCC; font-size: 12px; max-width: 220px;")
+        ts2_note.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        row2.addWidget(ts2_note, 0)
+        w2 = QWidget()
+        w2.setLayout(row2)
+        vl.addWidget(w2)
+        vl.addStretch()
+        scroll.setWidget(inner)
+        lay.addWidget(scroll)
+        self.tabWidget.addTab(outer, "TEMP STABILITY")
+
+    def _merge_ts_operation_block(self, slot: int, visible: dict) -> dict:
+        """Defaults + last-loaded hidden keys + current visible fields (visible wins)."""
+        out = dict(_TS_RECIPE_DEFAULTS)
+        b = self._ts_slot_backup.get(slot)
+        if isinstance(b, dict):
+            out.update(b)
+        out.update(visible)
+        return out
+
+    def _build_ts_stability_panel(self, slot: int) -> QWidget:
+        d = self._ts_slot_widgets[slot]
+        w = QWidget()
+        w.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(GROUP_SPACING)
+
+        three = QHBoxLayout()
+        three.setSpacing(12)
+
+        ctrl = QGroupBox("Control Parameters")
+        ctrl.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        cg = QGridLayout(ctrl)
+        cg.setSpacing(8)
+        cg.setContentsMargins(*GROUP_MARGINS)
+        r = 0
+        d["min_temp"] = QDoubleSpinBox()
+        d["min_temp"].setRange(-200.0, 200.0)
+        d["min_temp"].setDecimals(2)
+        d["min_temp"].setValue(0.0)
+        d["min_temp"].setFixedWidth(INPUT_WIDTH)
+        cg.addWidget(QLabel("MIN Temp"), r, 0)
+        cg.addWidget(d["min_temp"], r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        r += 1
+        d["max_t"] = QDoubleSpinBox()
+        d["max_t"].setRange(-200.0, 200.0)
+        d["max_t"].setDecimals(2)
+        d["max_t"].setValue(0.0)
+        d["max_t"].setFixedWidth(INPUT_WIDTH)
+        cg.addWidget(QLabel("MAX Temp"), r, 0)
+        cg.addWidget(d["max_t"], r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        r += 1
+        d["step"] = QDoubleSpinBox()
+        d["step"].setRange(0.0, 50.0)
+        d["step"].setDecimals(3)
+        d["step"].setValue(0.0)
+        d["step"].setFixedWidth(INPUT_WIDTH)
+        cg.addWidget(QLabel("INC"), r, 0)
+        cg.addWidget(d["step"], r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        r += 1
+        d["wait_ms"] = QSpinBox()
+        d["wait_ms"].setRange(0, 3_600_000)
+        d["wait_ms"].setValue(0)
+        d["wait_ms"].setFixedWidth(INPUT_WIDTH)
+        cg.addWidget(QLabel("WAIT TIME"), r, 0)
+        cg.addWidget(d["wait_ms"], r, 1)
+        cg.addWidget(QLabel("ms"), r, 2)
+        r += 1
+        d["set_curr"] = QDoubleSpinBox()
+        d["set_curr"].setRange(0.0, 5000.0)
+        d["set_curr"].setDecimals(2)
+        d["set_curr"].setValue(10.0)
+        d["set_curr"].setFixedWidth(INPUT_WIDTH)
+        d["use_rated"] = QCheckBox("Use I@Rated_P")
+        hset = QHBoxLayout()
+        hset.addWidget(d["set_curr"])
+        hset.addWidget(QLabel("mA"))
+        hset.addWidget(d["use_rated"])
+        hset.addStretch()
+        cg.addWidget(QLabel("Set Curr"), r, 0)
+        cg.addLayout(hset, r, 1, 1, 2)
+        r += 1
+        d["initial"] = QDoubleSpinBox()
+        d["initial"].setRange(-200.0, 200.0)
+        d["initial"].setDecimals(2)
+        d["initial"].setValue(0.0)
+        d["initial"].setFixedWidth(INPUT_WIDTH)
+        cg.addWidget(QLabel("Init Temp"), r, 0)
+        cg.addWidget(d["initial"], r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        three.addWidget(ctrl, 1)
+
+        ando = QGroupBox("Ando Parameters")
+        ando.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        ag = QGridLayout(ando)
+        ag.setSpacing(8)
+        ag.setContentsMargins(*GROUP_MARGINS)
+        r = 0
+        d["span_nm"] = QDoubleSpinBox()
+        d["span_nm"].setRange(0.0, 500.0)
+        d["span_nm"].setDecimals(3)
+        d["span_nm"].setValue(0.0)
+        d["span_nm"].setFixedWidth(INPUT_WIDTH)
+        ag.addWidget(QLabel("Span"), r, 0)
+        ag.addWidget(d["span_nm"], r, 1)
+        ag.addWidget(QLabel("nm"), r, 2)
+        r += 1
+        d["smpl"] = QSpinBox()
+        d["smpl"].setRange(0, 20001)
+        d["smpl"].setValue(0)
+        d["smpl"].setFixedWidth(INPUT_WIDTH)
+        ag.addWidget(QLabel("Sampling"), r, 0)
+        ag.addWidget(d["smpl"], r, 1)
+        r += 1
+        d["continuous_scan"] = QCheckBox("Continuous Scan")
+        ag.addWidget(d["continuous_scan"], r, 0, 1, 3)
+
+        mid_col = QWidget()
+        mid_col.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        mid_v = QVBoxLayout(mid_col)
+        mid_v.setContentsMargins(0, 0, 0, 0)
+        mid_v.setSpacing(8)
+        mid_v.addWidget(ando)
+        off_row = QHBoxLayout()
+        off_row.setSpacing(10)
+        d["offset1"] = QLineEdit("10")
+        d["offset1"].setFixedWidth(INPUT_WIDTH)
+        d["offset2"] = QLineEdit("0")
+        d["offset2"].setFixedWidth(INPUT_WIDTH)
+        d["deg_stability"] = QSpinBox()
+        d["deg_stability"].setRange(1, 50)
+        d["deg_stability"].setValue(5)
+        d["deg_stability"].setFixedWidth(70)
+        off_row.addWidget(QLabel("Offset1"))
+        off_row.addWidget(d["offset1"])
+        off_row.addWidget(QLabel("Offset2"))
+        off_row.addWidget(d["offset2"])
+        off_row.addSpacing(12)
+        off_row.addWidget(QLabel("Deg of Stability"))
+        off_row.addWidget(d["deg_stability"])
+        off_row.addStretch()
+        mid_v.addLayout(off_row)
+        three.addWidget(mid_col, 1)
+
+        lim = QGroupBox("Limits")
+        lim.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        lg = QGridLayout(lim)
+        lg.setSpacing(6)
+        lg.setContentsMargins(*GROUP_MARGINS)
+        lg.addWidget(QLabel(""), 0, 0)
+        h_ll = QLabel("LL")
+        h_ul = QLabel("UL")
+        h_en = QLabel("Enable")
+        for hx, c in ((h_ll, 1), (h_ul, 2), (h_en, 3)):
+            hx.setStyleSheet("font-weight: bold;")
+            lg.addWidget(hx, 0, c)
+        limit_names = ("FWHM", "SMSR", "Width1", "Width2", "WL", "Power")
+        d["limits_entries"] = {}
+        for ri, name in enumerate(limit_names, start=1):
+            lg.addWidget(QLabel(name), ri, 0)
+            ll_e = QLineEdit("0")
+            ll_e.setFixedWidth(72)
+            ul_e = QLineEdit("0")
+            ul_e.setFixedWidth(72)
+            en_e = QCheckBox()
+            lg.addWidget(ll_e, ri, 1)
+            if name == "Power":
+                ul_e.setVisible(False)
+                lg.addWidget(QLabel("—"), ri, 2)
+            else:
+                lg.addWidget(ul_e, ri, 2)
+            lg.addWidget(en_e, ri, 3)
+            d["limits_entries"][name] = {"ll": ll_e, "ul": ul_e, "enable": en_e}
+        three.addWidget(lim, 1)
+
+        root.addLayout(three)
+
+        foot = QHBoxLayout()
+        d["save_pdf"] = QCheckBox("Save PDF")
+        foot.addWidget(d["save_pdf"])
+        foot.addStretch()
+        root.addLayout(foot)
+
+        return w
+
     def _create_ando_settings_tab(self):
         ando_tab = QWidget()
         ando_tab.setStyleSheet(RECIPE_TAB_STYLESHEET)
         ando_layout = QHBoxLayout(ando_tab)
         ando_layout.setContentsMargins(15, 15, 15, 15)
         ando_layout.setSpacing(15)
+        ando_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -879,7 +1093,6 @@ class RecipeWindow(QMainWindow):
         boxes_row.addWidget(box2, 2)
         right_layout.addLayout(boxes_row)
         auto_ref_row = QHBoxLayout()
-        auto_ref_row.addStretch()
         auto_ref_label = QLabel("Auto Ref Level")
         self._apply_font_to_widget(auto_ref_label, 'label')
         auto_ref_row.addWidget(auto_ref_label)
@@ -897,8 +1110,7 @@ class RecipeWindow(QMainWindow):
         wavemeter_layout = QHBoxLayout(wavemeter_tab)
         wavemeter_layout.setContentsMargins(15, 15, 15, 15)
         wavemeter_layout.setSpacing(15)
-        wavemeter_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        wavemeter_layout.addStretch(1)
+        wavemeter_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         center_widget = QWidget()
         center_layout = QVBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -937,197 +1149,7 @@ class RecipeWindow(QMainWindow):
         center_layout.addWidget(q8326_group)
         center_layout.addStretch()
         wavemeter_layout.addWidget(center_widget, 0)
-        wavemeter_layout.addStretch(1)
         return wavemeter_tab
-
-    def _create_temp_stability_tab(self):
-        tempstab_tab = QWidget()
-        tempstab_tab.setStyleSheet(RECIPE_TAB_STYLESHEET)
-        tempstab_layout = QVBoxLayout(tempstab_tab)
-        tempstab_layout.setContentsMargins(15, 15, 15, 15)
-        tempstab_layout.setSpacing(15)
-        ts1_group, self._ts1_widgets = self._create_temp_stability_block("Temperature Stability 1")
-        tempstab_layout.addWidget(ts1_group)
-        ts2_group, self._ts2_widgets = self._create_temp_stability_block("Temperature Stability 2")
-        tempstab_layout.addWidget(ts2_group)
-        tempstab_layout.addWidget(QLabel("Temperature Stability 2 will only run if Temperature Stability 1 passes."))
-        tempstab_layout.addStretch()
-        self.tabWidget.addTab(tempstab_tab, "Temperature Stability")
-
-    def _create_temp_stability_block(self, title):
-        main_group = QGroupBox(title)
-        main_layout = QHBoxLayout(main_group)
-        main_layout.setSpacing(GROUP_SPACING)
-        ctrl_group = QGroupBox("Control Parameters")
-        ctrl_layout = QFormLayout(ctrl_group)
-        ctrl_layout.setSpacing(GROUP_SPACING)
-        ctrl_layout.setContentsMargins(*GROUP_MARGINS)
-        min_temp = QLineEdit("0")
-        max_temp = QLineEdit("0")
-        inc = QLineEdit("0")
-        wait_ms = QLineEdit("0")
-        set_curr = QLineEdit("10")
-        use_i_rated = QCheckBox("Use I@Rated_P")
-        init_temp = QLineEdit("0")
-        ctrl_layout.addRow("MINTemp (C):", min_temp)
-        ctrl_layout.addRow("MAXTemp (C):", max_temp)
-        ctrl_layout.addRow("INC (C):", inc)
-        ctrl_layout.addRow("WAIT TIME (ms):", wait_ms)
-        ctrl_layout.addRow("Set Curr (mA):", set_curr)
-        ctrl_layout.addRow("", use_i_rated)
-        ctrl_layout.addRow("Init Temp (C):", init_temp)
-        main_layout.addWidget(ctrl_group)
-        save_pdf = QCheckBox("Save PDF")
-        main_layout.addWidget(save_pdf)
-        ando_group = QGroupBox("Ando Parameters")
-        ando_layout = QFormLayout(ando_group)
-        ando_layout.setSpacing(GROUP_SPACING)
-        ando_layout.setContentsMargins(*GROUP_MARGINS)
-        span = QLineEdit("0")
-        sampling = QLineEdit("0")
-        continuous_scan = QCheckBox("Continuous Scan")
-        offset1 = QLineEdit("10")
-        offset2 = QLineEdit("0")
-        ando_layout.addRow("Span:", span)
-        ando_layout.addRow("Sampling:", sampling)
-        ando_layout.addRow("", continuous_scan)
-        ando_layout.addRow("Offset1:", offset1)
-        ando_layout.addRow("Offset2:", offset2)
-        main_layout.addWidget(ando_group)
-        limits_group = QGroupBox("Limits")
-        limits_layout = QGridLayout(limits_group)
-        limits_layout.setSpacing(GROUP_SPACING)
-        limits_layout.setContentsMargins(*GROUP_MARGINS)
-        limits_layout.addWidget(QLabel("LL"), 0, 1)
-        limits_layout.addWidget(QLabel("UL"), 0, 2)
-        limits_layout.addWidget(QLabel("Enable"), 0, 3)
-        limit_params = [
-            ("FWHM", "10", "10"),
-            ("SMSR", "10", "10"),
-            ("Width1", "10", "10"),
-            ("Width2", "10", "10"),
-            ("WL", "10", "10"),
-            ("Power", "0", "")
-        ]
-        limits_entries = {}
-        for i, (param, ll_val, ul_val) in enumerate(limit_params):
-            row = i + 1
-            limits_layout.addWidget(QLabel(param), row, 0)
-            ll_e = QLineEdit(ll_val)
-            ul_e = QLineEdit(ul_val if ul_val else "")
-            en_cb = QCheckBox()
-            limits_layout.addWidget(ll_e, row, 1)
-            limits_layout.addWidget(ul_e, row, 2)
-            limits_layout.addWidget(en_cb, row, 3)
-            limits_entries[param] = {"ll": ll_e, "ul": ul_e, "enable": en_cb}
-        main_layout.addWidget(limits_group)
-        deg_layout = QHBoxLayout()
-        deg_layout.addWidget(QLabel("Deg of Stability:"))
-        deg_stability = QLineEdit("5")
-        deg_layout.addWidget(deg_stability)
-        deg_layout.addStretch()
-        main_layout.addLayout(deg_layout)
-        widgets = {
-            "min_temp": min_temp,
-            "max_temp": max_temp,
-            "inc": inc,
-            "wait_ms": wait_ms,
-            "set_curr": set_curr,
-            "use_i_rated": use_i_rated,
-            "init_temp": init_temp,
-            "save_pdf": save_pdf,
-            "span": span,
-            "sampling": sampling,
-            "continuous_scan": continuous_scan,
-            "offset1": offset1,
-            "offset2": offset2,
-            "limits": limits_entries,
-            "deg_stability": deg_stability,
-        }
-        return main_group, widgets
-
-    def _load_temp_stability_widgets(self, widgets_dict, blk, stab):
-        """Fill one TS block from OPERATIONS block dict + optional STABILITY legacy dict."""
-        from operations.recipe_ts_helpers import first_in_dict, first_or_fallback, wait_time_ms_for_display
-
-        if not widgets_dict:
-            return
-        if not isinstance(blk, dict):
-            blk = {}
-        if not isinstance(stab, dict):
-            stab = {}
-
-        def safe_set_text(w, v):
-            if w is None:
-                return
-            w.setText("" if v is None else str(v))
-
-        def safe_set_check(w, v):
-            if w is not None:
-                w.setChecked(bool(v))
-
-        safe_set_text(
-            widgets_dict["min_temp"],
-            first_or_fallback(blk, ("MinTemp", "min_temp", "MINTemp", "min_temp_c"), stab, ("min_temp",)),
-        )
-        safe_set_text(
-            widgets_dict["max_temp"],
-            first_or_fallback(blk, ("MaxTemp", "max_temp", "MAXTemp", "max_temp_c"), stab, ("max_temp",)),
-        )
-        safe_set_text(
-            widgets_dict["inc"],
-            first_or_fallback(
-                blk,
-                ("TempIncrement", "INC", "inc", "TempIncrement_c", "increment_c"),
-                stab,
-                ("inc",),
-            ),
-        )
-        wt = wait_time_ms_for_display(blk, stab)
-        safe_set_text(widgets_dict["wait_ms"], wt if wt != "" else "")
-        safe_set_text(
-            widgets_dict["set_curr"],
-            first_or_fallback(
-                blk,
-                ("Current", "current", "SetCurr", "set_curr", "laser_current_mA"),
-                stab,
-                ("current",),
-            ),
-        )
-        safe_set_text(
-            widgets_dict["init_temp"],
-            first_or_fallback(
-                blk,
-                ("InitTemp", "Init_Temp", "InitialTemp", "initial_temp_c", "MinTemp"),
-                stab,
-                ("temperature",),
-            ),
-        )
-        safe_set_text(widgets_dict["span"], first_in_dict(blk, ("Span", "span_nm", "WideSpan_nm"), ""))
-        safe_set_text(widgets_dict["sampling"], first_in_dict(blk, ("Sampling", "sampling_points", "sampling"), ""))
-        safe_set_text(widgets_dict["offset1"], first_in_dict(blk, ("Offset1", "offset1"), ""))
-        safe_set_text(widgets_dict["offset2"], first_in_dict(blk, ("Offset2", "offset2"), ""))
-        deg = first_in_dict(
-            blk,
-            (
-                "DegOfStability",
-                "deg_stability",
-                "Deg of Stability",
-                "DegOfStability_c",
-                "WavelengthTolerance_nm",
-                "wavelength_tolerance_nm",
-            ),
-            "",
-        )
-        safe_set_text(widgets_dict["deg_stability"], deg)
-
-        lim = blk.get("limits") if isinstance(blk.get("limits"), dict) else {}
-        for param, entries in widgets_dict.get("limits", {}).items():
-            sub = lim.get(param) or lim.get(param.replace(" ", "")) or {}
-            if isinstance(sub, dict):
-                safe_set_text(entries["ll"], sub.get("ll", ""))
-                safe_set_text(entries["ul"], sub.get("ul", ""))
-                safe_set_check(entries["enable"], sub.get("enable", False))
 
     def _browse_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Select Save Directory")
@@ -1271,11 +1293,41 @@ class RecipeWindow(QMainWindow):
             wavemeter = spec.get('WAVEMETER', data.get('WAVEMETER', {}))
             if isinstance(wavemeter, dict):
                 safe_set_check(self.smsrCheckBox, wavemeter.get('smsr', False))
-            from operations.recipe_ts_helpers import resolve_temperature_stability_blocks
-
-            ts1, ts2, stab = resolve_temperature_stability_blocks(data)
-            self._load_temp_stability_widgets(getattr(self, "_ts1_widgets", None), ts1, stab)
-            self._load_temp_stability_widgets(getattr(self, "_ts2_widgets", None), ts2, stab)
+            ops = data.get("OPERATIONS") or data.get("operations") or {}
+            if isinstance(ops, dict) and getattr(self, "_ts_slot_widgets", None):
+                for slot in (1, 2):
+                    key = "Temperature Stability {}".format(slot)
+                    ts = ops.get(key) if isinstance(ops.get(key), dict) else {}
+                    d = self._ts_slot_widgets.get(slot) or {}
+                    if not d:
+                        continue
+                    if isinstance(ts, dict):
+                        self._ts_slot_backup[slot] = dict(ts)
+                    else:
+                        self._ts_slot_backup[slot] = {}
+                    safe_set_value(d["min_temp"], ts.get("MinTemp", ts.get("min_temp_c", ts.get("MINTemp", 0))))
+                    safe_set_value(d["max_t"], ts.get("MaxTemperature", ts.get("max_temp_c", 0)))
+                    safe_set_value(d["step"], ts.get("TemperatureStep", ts.get("step_temp_c", 0)))
+                    safe_set_value(d["wait_ms"], int(ts.get("WaitTime_ms", ts.get("wait_time_ms", 0)) or 0))
+                    safe_set_value(d["set_curr"], float(ts.get("SetCurrent_mA", ts.get("set_current_mA", 10)) or 0))
+                    safe_set_check(d["use_rated"], ts.get("UseI_at_Rated_P", ts.get("use_I_at_rated", False)))
+                    safe_set_value(d["initial"], ts.get("InitialTemperature", ts.get("initial_temp_c", 0)))
+                    safe_set_value(d["span_nm"], ts.get("StabilitySpan_nm", ts.get("span_nm", 0)))
+                    safe_set_value(d["smpl"], ts.get("StabilitySampling", ts.get("sampling_points", 0)))
+                    safe_set_check(d["continuous_scan"], ts.get("ContinuousScan", ts.get("continuous_scan", False)))
+                    safe_set_text(d["offset1"], ts.get("Offset1_nm", ts.get("offset1", "10")))
+                    safe_set_text(d["offset2"], ts.get("Offset2_nm", ts.get("offset2", "0")))
+                    safe_set_check(d["save_pdf"], ts.get("SavePDF", ts.get("save_pdf", False)))
+                    safe_set_value(d["deg_stability"], int(ts.get("DegOfStability", ts.get("deg_of_stability", 5)) or 5))
+                    lim = ts.get("limits") if isinstance(ts.get("limits"), dict) else {}
+                    for pname, ent in (d.get("limits_entries") or {}).items():
+                        if not isinstance(ent, dict):
+                            continue
+                        sub = lim.get(pname) if isinstance(lim.get(pname), dict) else {}
+                        safe_set_text(ent.get("ll"), sub.get("ll", sub.get("LL", "0")))
+                        if pname != "Power" and ent.get("ul") is not None:
+                            safe_set_text(ent["ul"], sub.get("ul", sub.get("UL", "0")))
+                        safe_set_check(ent.get("enable"), sub.get("enable", sub.get("Enable", False)))
             # So Save works without Browse: remember file and set save folder.
             self._last_saved_or_loaded_path = os.path.abspath(filepath)
             ddir = os.path.dirname(self._last_saved_or_loaded_path)
@@ -1439,13 +1491,43 @@ class RecipeWindow(QMainWindow):
                     "averaging": get_combo(self.avgCombo, "OFF"),
                     "smsr": get_checked(self.smsrCheckBox, False)
                 },
-                "STABILITY": {
-                    "temperature": get_value(self.tempSpin, 25),
-                    "current": get_value(self.andoCurrentSpin, 0),
-                    "duration_minutes": 60
-                }
             }
         }
+        tw = getattr(self, "_ts_slot_widgets", None)
+        if isinstance(tw, dict):
+            for slot in (1, 2):
+                d = tw.get(slot) or {}
+                if not d:
+                    continue
+                limits_out = {}
+                for pname, ent in (d.get("limits_entries") or {}).items():
+                    if not isinstance(ent, dict):
+                        continue
+                    limits_out[pname] = {
+                        "ll": get_text(ent.get("ll"), "0"),
+                        "ul": "" if pname == "Power" else get_text(ent.get("ul"), "0"),
+                        "enable": get_checked(ent.get("enable"), False),
+                    }
+                visible_ts = {
+                    "MinTemp": float(get_value(d["min_temp"], 0.0)),
+                    "MaxTemperature": float(get_value(d["max_t"], 0.0)),
+                    "TemperatureStep": float(get_value(d["step"], 0.0)),
+                    "WaitTime_ms": int(get_value(d["wait_ms"], 0)),
+                    "SetCurrent_mA": float(get_value(d["set_curr"], 10.0)),
+                    "UseI_at_Rated_P": get_checked(d["use_rated"], False),
+                    "InitialTemperature": float(get_value(d["initial"], 0.0)),
+                    "StabilitySpan_nm": float(get_value(d["span_nm"], 0.0)),
+                    "StabilitySampling": int(get_value(d["smpl"], 0)),
+                    "ContinuousScan": get_checked(d["continuous_scan"], False),
+                    "Offset1_nm": get_text(d["offset1"], "10"),
+                    "Offset2_nm": get_text(d["offset2"], "0"),
+                    "limits": limits_out,
+                    "SavePDF": get_checked(d["save_pdf"], False),
+                    "DegOfStability": int(get_value(d["deg_stability"], 5)),
+                }
+                recipe["OPERATIONS"]["Temperature Stability {}".format(slot)] = self._merge_ts_operation_block(
+                    slot, visible_ts
+                )
         safe_name = "".join(c for c in recipe_name if c not in '<>:"/\\|?*').strip() or "recipe"
         # Overwrite the file that was loaded (keeps .json / .RCP); otherwise create .json in save folder.
         if loaded and os.path.isfile(loaded):
@@ -1465,9 +1547,9 @@ class RecipeWindow(QMainWindow):
 
 
 if __name__ == "__main__":
-    from start.window_placement import move_to_secondary_screen
+    from start.window_placement import place_on_secondary_screen_before_show
     app = QApplication(sys.argv)
     window = RecipeWindow()
+    place_on_secondary_screen_before_show(window, None, maximize=True)
     window.show()
-    QTimer.singleShot(50, lambda: move_to_secondary_screen(window, maximize=True))
     sys.exit(app.exec_())

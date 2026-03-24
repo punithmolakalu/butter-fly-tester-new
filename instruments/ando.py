@@ -12,7 +12,7 @@ import re
 import struct
 import time
 import warnings
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 warnings.filterwarnings("ignore", category=UserWarning, module="gpib_ctypes")
 
@@ -593,6 +593,60 @@ class AndoConnection:
         except (TypeError, ValueError, IndexError):
             pass
         return out
+
+    def read_all_analysis_results(self, analysis_hint: str = "DFB-LD") -> Optional[Tuple[float, float, float]]:
+        """
+        Return one tuple (fwhm_nm, smsr_dB, peak_wl_nm) from ANA?/ANAR? with PKWL/SPWD/SMSR? fallbacks.
+
+        Intended for VBG-style stability: after SGL + analysis mode (DFBAN/LEDAN/FPAN) + peak search,
+        read the same quantities the reference ``read_all_analysis_results()`` returns from the Ando.
+        """
+        ana = self.query_analysis_ana(analysis_hint)
+        anar = self.query_analysis_anar(analysis_hint)
+        fwhm: Optional[float] = None
+        smsr: Optional[float] = None
+        pk_wl: Optional[float] = None
+        if isinstance(ana, dict):
+            if ana.get("WD_3dB_nm") is not None:
+                try:
+                    fwhm = float(ana["WD_3dB_nm"])
+                except (TypeError, ValueError):
+                    pass
+            if ana.get("PK_WL_nm") is not None:
+                try:
+                    pk_wl = float(ana["PK_WL_nm"])
+                except (TypeError, ValueError):
+                    pass
+            if ana.get("SMSR_dB") is not None:
+                try:
+                    smsr = float(ana["SMSR_dB"])
+                except (TypeError, ValueError):
+                    pass
+        if isinstance(anar, dict):
+            if pk_wl is None and anar.get("PK_WL_nm") is not None:
+                try:
+                    pk_wl = float(anar["PK_WL_nm"])
+                except (TypeError, ValueError):
+                    pass
+            if fwhm is None and anar.get("SPEC_WD_nm") is not None:
+                try:
+                    fwhm = float(anar["SPEC_WD_nm"])
+                except (TypeError, ValueError):
+                    pass
+            if smsr is None and anar.get("SMSR_dB") is not None:
+                try:
+                    smsr = float(anar["SMSR_dB"])
+                except (TypeError, ValueError):
+                    pass
+        if pk_wl is None:
+            pk_wl = self.query_peak_wavelength_nm()
+        if fwhm is None:
+            fwhm = self.query_spectral_width_nm()
+        if smsr is None:
+            smsr = self.query_smsr_db()
+        if pk_wl is None and fwhm is None:
+            return None
+        return (fwhm, smsr, pk_wl)
 
     def wait_sweep_done(self, timeout_s: float = 180.0, poll_s: float = 0.25) -> bool:
         """Poll SWEEP? until idle or timeout."""

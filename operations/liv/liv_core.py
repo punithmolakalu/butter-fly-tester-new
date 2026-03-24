@@ -150,11 +150,14 @@ class LIVProcessResult:
     power_array: List[float] = field(default_factory=list)
     voltage_array: List[float] = field(default_factory=list)
     pd_array: List[float] = field(default_factory=list)
+    tec_temp_min: float = 0.0
+    tec_temp_max: float = 0.0
     final_power: float = 0.0
     thorlabs_average_power_mw: float = 0.0
     thorlabs_calib_factor: float = 1.0
     power_at_rated_current: float = 0.0
     current_at_rated_power: float = 0.0
+    pd_at_rated_current: float = 0.0
     threshold_current: float = 0.0
     slope_efficiency: float = 0.0
     liv_result: Any = None  # self for GUI compatibility
@@ -446,6 +449,7 @@ class LIVMain(_LIVMainBase):
             powers: List[float] = []
             voltages: List[float] = []
             pd_list: List[float] = []
+            temps_sweep: List[float] = []
             liv_sweep_stopped = False
 
             for i in range(num_steps):
@@ -472,7 +476,9 @@ class LIVMain(_LIVMainBase):
                     pass
                 try:
                     if getattr(self._arroyo, "read_temp", None):
-                        _ = self._arroyo.read_temp()
+                        t_r = self._arroyo.read_temp()
+                        if t_r is not None:
+                            temps_sweep.append(float(t_r))
                 except Exception:
                     pass
 
@@ -496,6 +502,12 @@ class LIVMain(_LIVMainBase):
             result.power_array = powers
             result.voltage_array = voltages
             result.pd_array = pd_list
+            if temps_sweep:
+                result.tec_temp_min = min(temps_sweep)
+                result.tec_temp_max = max(temps_sweep)
+            else:
+                result.tec_temp_min = float(p.temperature)
+                result.tec_temp_max = float(p.temperature)
             result.final_power = powers[-1] if powers else 0.0
 
             if liv_sweep_stopped:
@@ -548,6 +560,8 @@ class LIVMain(_LIVMainBase):
                 idx_rated = min(int((p.rated_current_mA - p.min_current_mA) / p.increment_mA), len(powers) - 1)
                 idx_rated = max(0, idx_rated)
                 result.power_at_rated_current = powers[idx_rated] if idx_rated < len(powers) else powers[-1]
+                if pd_list and 0 <= idx_rated < len(pd_list):
+                    result.pd_at_rated_current = float(pd_list[idx_rated])
                 for i, pw in enumerate(powers):
                     if pw >= p.rated_power_mW:
                         result.current_at_rated_power = currents[i] if i < len(currents) else currents[-1]

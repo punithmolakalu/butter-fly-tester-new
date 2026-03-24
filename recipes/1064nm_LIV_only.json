@@ -64,11 +64,6 @@
             "resolution": "0.001nm",
             "sample_mode": "RUN",
             "averaging": "OFF"
-        },
-        "STABILITY": {
-            "temperature": 25,
-            "current": 0,
-            "duration_minutes": 60
         }
     }
 }

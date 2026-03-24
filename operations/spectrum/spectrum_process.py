@@ -302,6 +302,10 @@ class SpectrumProcessResult:
     second_wavemeter_nm: Optional[float] = None
     peak_wavelength_first_nm: Optional[float] = None
     peak_wavelength_second_nm: Optional[float] = None
+    peak_level_first_dbm: Optional[float] = None
+    fwhm_first_nm: Optional[float] = None
+    smsr_first_db: Optional[float] = None
+    passed_first_sweep: bool = False
     wavemeter_nm_for_axis_label: Optional[float] = None
     # If True, main tab may show final PASS/FAIL and Spectrum floating window closes after this emit.
     # If False, only refresh plots (first sweep done; keep floating window open until final emit).
@@ -716,6 +720,10 @@ class SpectrumProcess:
                     result.peak_wavelength_first_nm = float(m1["pk_wl"]) if m1.get("pk_wl") is not None else None
             else:
                 result.peak_wavelength_first_nm = float(m1["pk_wl"]) if m1.get("pk_wl") is not None else None
+        result.peak_level_first_dbm = float(m1["pk_lv"]) if m1.get("pk_lv") is not None else None
+        result.fwhm_first_nm = float(m1["fwhm"]) if m1.get("fwhm") is not None else None
+        result.smsr_first_db = float(m1["smsr"]) if m1.get("smsr") is not None else None
+        result.passed_first_sweep = len(result.fail_reasons) == 0
         # Floating Spectrum window first, then main window First sweep tab; then wait before second sweep.
         self._emit_live_trace(executor, w1, l1)
         self._emit_step_status(

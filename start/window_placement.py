@@ -64,11 +64,33 @@ def move_to_screen(window, screen, maximize=False):
         window.resize(min(geom.width(), 1200), min(geom.height(), 800))
 
 
+def place_on_secondary_screen_before_show(window, reference_window=None, maximize=False):
+    """
+    Put the window on the secondary monitor **before** the first show() so it does not
+    briefly appear on the primary display. Same geometry as move_to_secondary_screen.
+
+    Use this for LIV / PER / Spectrum / Recipe / Alignment / Temperature Stability floating windows.
+    After show(), optional: call move_to_secondary_screen again if the platform nudges the window.
+    """
+    screen = get_secondary_screen(reference_window)
+    if screen is None:
+        return
+    geom = screen.availableGeometry()
+    if maximize:
+        window.setGeometry(geom)
+    else:
+        w = min(geom.width(), 1200)
+        h = min(geom.height(), 800)
+        window.resize(w, h)
+        window.move(geom.x(), geom.y())
+
+
 def move_to_secondary_screen(window, reference_window=None, maximize=False):
     """
     Move the given window to a monitor that is NOT the one containing reference_window.
     If reference_window is None, use the secondary monitor (screens[1]) when multiple screens exist.
-    Call this after show() for best results on Windows (windowHandle exists after show).
+
+    Prefer place_on_secondary_screen_before_show() + show() to avoid a flash on the primary monitor.
     If maximize is True, show the window maximized on that screen (taskbar excluded via availableGeometry).
     """
     screen = get_secondary_screen(reference_window)

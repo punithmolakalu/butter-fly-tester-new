@@ -4,6 +4,12 @@ Normalize recipe dicts after load so GUI-saved JSON and hand-edited files behave
 RecipeWindow saves: GENERAL.TestSequence (no top-level TEST_SEQUENCE), GENERAL.RecipeName,
 OPERATIONS.SPECTRUM.current (lowercase), etc. Test sequence / readonly view / Arroyo helpers
 also accept top-level TEST_SEQUENCE, Recipe_Name, Current aliases — we merge missing keys here.
+
+Top-level or hand-edited blocks named "Temperature Stability 1" / "Temperature Stability 2" are
+hoisted into OPERATIONS so temperature stability matches the New Recipe TEMP STABILITY tab.
+
+If Wavelength is set at top level or in GENERAL but OPERATIONS.SPECTRUM has no center wavelength,
+the value is copied to CenterWL / center_nm so preamble Ando uses the same nm as RCP-GEN (e.g. 1064).
 """
 from __future__ import annotations
 
@@ -22,7 +28,14 @@ def _pull_known_blocks_from_top(data: Dict[str, Any]) -> Dict[str, Any]:
             continue
         nk = n(k)
         ck = None
-        if k in ("LIV", "PER", "SPECTRUM", "STABILITY", "WAVEMETER", "Temperature Stability 1", "Temperature Stability 2"):
+        if k in (
+            "LIV",
+            "PER",
+            "SPECTRUM",
+            "WAVEMETER",
+            "Temperature Stability 1",
+            "Temperature Stability 2",
+        ):
             ck = k
         elif nk == "liv":
             ck = "LIV"
@@ -30,13 +43,11 @@ def _pull_known_blocks_from_top(data: Dict[str, Any]) -> Dict[str, Any]:
             ck = "PER"
         elif nk == "spectrum":
             ck = "SPECTRUM"
-        elif nk == "stability":
-            ck = "STABILITY"
         elif nk == "wavemeter":
             ck = "WAVEMETER"
-        elif nk in ("temperaturestability1", "tempstability1", "ts1"):
+        elif nk == "temperaturestability1":
             ck = "Temperature Stability 1"
-        elif nk in ("temperaturestability2", "tempstability2", "ts2"):
+        elif nk == "temperaturestability2":
             ck = "Temperature Stability 2"
         if ck is not None and ck not in out:
             out[ck] = dict(v)
@@ -45,9 +56,8 @@ def _pull_known_blocks_from_top(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def hoist_recipe_blocks_into_operations(data: Any) -> None:
     """
-    Mutate in-place: ensure OPERATIONS contains LIV/PER/SPECTRUM/TS/STABILITY when present
-    at top level or under recipe.OPERATIONS. Merges top-level TS blocks when OPERATIONS exists
-    but omits them (common hand-edited layout).
+    Mutate in-place: ensure OPERATIONS contains LIV/PER/SPECTRUM when present
+    at top level or under recipe.OPERATIONS.
     """
     if not isinstance(data, dict):
         return
@@ -145,6 +155,15 @@ def normalize_loaded_recipe(data: Any) -> Any:
         if c > 0:
             spec["Current"] = c
             spec["current"] = c
+        # Center wavelength: top-level / GENERAL Wavelength → SPECTRUM when center missing (e.g. 1064 nm in GENERAL only)
+        wl = _f(data.get("Wavelength"))
+        if wl <= 0:
+            wl = _f(g.get("Wavelength"))
+        if wl > 0:
+            ctr = _f(spec.get("CenterWL")) or _f(spec.get("center_nm"))
+            if ctr <= 0:
+                spec["CenterWL"] = wl
+                spec["center_nm"] = wl
 
     # GENERAL: laser current mA for fallbacks (RecipeWindow historically omitted this)
     cur_g = _f(g.get("Current")) or _f(g.get("current"))
@@ -152,24 +171,5 @@ def normalize_loaded_recipe(data: Any) -> Any:
         fc = _first_positive_current(op, g)
         if fc > 0:
             g["Current"] = fc
-
-    # Temperature Stability blocks: copy current if step omits it
-    for step_key in ("Temperature Stability 1", "Temperature Stability 2"):
-        blk = op.get(step_key)
-        if not isinstance(blk, dict):
-            continue
-        cur_b = _f(blk.get("Current")) or _f(blk.get("current"))
-        if cur_b > 0:
-            blk["Current"] = cur_b
-            blk["current"] = cur_b
-            continue
-        ref = _f(g.get("Current")) or _f(g.get("current"))
-        if ref <= 0:
-            spec2 = op.get("SPECTRUM") or op.get("spectrum") or {}
-            if isinstance(spec2, dict):
-                ref = _f(spec2.get("Current")) or _f(spec2.get("current"))
-        if ref > 0:
-            blk["Current"] = ref
-            blk["current"] = ref
 
     return data

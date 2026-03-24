@@ -1,4 +1,4 @@
-# Example: what the console prints during a PER run (when PER_TERMINAL_SAMPLES is on, default).
+# Example: what the console can print during a PER run when PER_TERMINAL_SAMPLES=1 (off by default).
 
 [PER] Pre-check   angle = 0.0000 deg   Thorlabs = 1.234e-03 mW
 [PER] --- sweep samples (continuous): index | angle (deg) | Thorlabs (mW) ---
@@ -10,4 +10,4 @@
 [PER] Summary  samples=342  PER=12.456 dB  at_max_angle=45.1200 deg  P_min=8.2e-05 mW  P_max=1.95e-03 mW
 
 # Step-scan fallback uses (step) instead of (sweep) in the last column.
-# To turn off terminal lines: set environment variable  PER_TERMINAL_SAMPLES=0
+# Terminal sample lines are disabled by default. To enable: set PER_TERMINAL_SAMPLES=1

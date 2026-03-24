@@ -5,9 +5,10 @@ Behavior:
 - When run from the GUI test sequence, Arroyo TEC + drive current are applied and the laser is turned ON
   (and verified) in TestSequenceExecutor before this process runs; PER assumes beam is available for Thorlabs.
 - PRM speed uses same set_speed(°/s, DEFAULT_ACCEL) as Manual Control; setup speed defaults to meas speed if omitted
-- Continuous sweep: Thorlabs is read when |Δangle| ≥ meas speed (°/s), e.g. 5 °/s → every 5°, 10 °/s → every 10°
-  (same idea as tests/per_prm_thorlabs_terminal_test.py). Position is polled each loop; loop sleep still respects
-  wait_time and motion rate. If async MoveTo is unavailable, a worker thread runs blocking move_to(end)
+- Continuous sweep: Thorlabs is read when |Δangle| exceeds a small spacing (~0.12× meas speed, capped),
+  so the live curve is dense (similar to KDC/PM100 reference ~0.1 s cadence), not one sample per degree-per-second.
+  Position is polled each loop; loop sleep is capped (~0.18 s) so angle steps are not missed. If async MoveTo is
+  unavailable, a worker thread runs blocking move_to(end)
   while the main loop samples (still continuous motion). Step-scan is last resort only (no move_to).
 - Move PRM to start angle
 - Rotate to end angle
@@ -17,7 +18,7 @@ Behavior:
 - Move PRM back to start
 - Teardown "actuator home" means **actuator B only** (`home_b()`), not A or HOME BOTH.
 - Recipe ``skip_actuator`` / env ``BF_PER_SKIP_ACTUATOR=1``: skip actuator B move and home (no 206 mm / travel-driven move).
-- Console: each sample prints angle (deg) and Thorlabs (mW) when PER_TERMINAL_SAMPLES is on (default).
+- Console: each sample can print to the terminal when ``PER_TERMINAL_SAMPLES=1`` (default is off; GUI log still gets full PER messages).
 """
 from __future__ import annotations
 
@@ -30,13 +31,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 from operations.pass_fail_recipe import apply_per_pass_fail_criteria
 
-# Print every PER sample to the terminal (angle °, Thorlabs mW). Disable with env PER_TERMINAL_SAMPLES=0.
+# Print every PER sample to the terminal (angle °, Thorlabs mW). Opt-in with env PER_TERMINAL_SAMPLES=1.
 def _per_terminal_samples_enabled() -> bool:
-    return os.environ.get("PER_TERMINAL_SAMPLES", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    return os.environ.get("PER_TERMINAL_SAMPLES", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 
@@ -105,11 +106,12 @@ def _clamp_prm_speed_deg_s(speed_deg_per_sec: float, default: float = 10.0) -> f
 
 def _per_power_read_spacing_deg(meas_speed_deg_per_sec: float) -> float:
     """
-    Degrees between Thorlabs power reads during the meas sweep, matched to meas speed (°/s):
-    5 °/s → read every 5°, 10 °/s → every 10°, etc. (clamped like PRM speed, min 0.1°).
+    Degrees between Thorlabs reads during continuous sweep.
+    Finer than 1:1 with meas speed so the live curve matches reference scripts (KDC ~0.1 s cadence):
+    e.g. 10 °/s → ~1.2° between points instead of 10°, for a smooth power-vs-angle trace.
     """
     sp = _clamp_prm_speed_deg_s(float(meas_speed_deg_per_sec or 10.0))
-    return max(0.1, min(sp, 180.0))
+    return max(0.35, min(sp * 0.12, 5.0))
 
 
 @dataclass
@@ -471,7 +473,8 @@ class PERProcess:
         read_spacing_deg = _per_power_read_spacing_deg(params.meas_speed_deg_per_sec)
         wait_s = max(0.01, params.wait_time_ms / 1000.0)
         sleep_from_speed = read_spacing_deg / max(spd, 0.01)
-        loop_sleep_s = max(wait_s, min(sleep_from_speed, 2.0))
+        # Poll PRM often enough to catch each spacing step without sleeping a full second per iteration.
+        loop_sleep_s = max(wait_s, 0.04, min(sleep_from_speed * 0.35, 0.18))
         max_scan_sec = travel / max(spd, 0.01) + 120.0
         t_scan0 = time.time()
         last_sample_angle: Optional[float] = None

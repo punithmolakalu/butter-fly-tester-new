@@ -64,11 +64,6 @@
             "sample_mode": "RUN",
             "averaging": "OFF",
             "smsr": false
-        },
-        "STABILITY": {
-            "temperature": 25,
-            "current": 0,
-            "duration_minutes": 60
         }
     }
 }

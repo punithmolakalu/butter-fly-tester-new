@@ -1,7 +1,7 @@
 """
 PER Test Sequence Window.
 Left: PER RCP values + Stop button.
-Right: live graph — Thorlabs power (mW) vs PRM angle (deg).
+Right: live graph — Thorlabs power (dBm) vs angle (deg), matching PM100 / Kinesis reference plots.
 """
 # Match standalone Kinesis live plot: keep last N points for responsiveness.
 LIVE_PLOT_MAX_POINTS = 500
@@ -29,6 +29,7 @@ except ImportError:
     pg = None
 
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar
+from operations.per.per_units import mw_series_to_dbm, mw_to_dbm
 
 
 def _fmt(v, default="—"):
@@ -132,7 +133,7 @@ class PerTestSequenceWindow(QMainWindow):
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("PER Live — Thorlabs power (mW) vs PRM angle")
+        title = QLabel("PER Live — Power (dBm) vs Angle (deg)")
         title.setStyleSheet("font-weight: bold; font-size: 13px; color: #e6e6e6;")
         right_layout.addWidget(title)
 
@@ -143,24 +144,23 @@ class PerTestSequenceWindow(QMainWindow):
             pw = pg.PlotWidget()
             pw.setBackground("w")
             p = pw.getPlotItem()
-            p.showGrid(x=True, y=True, alpha=0.4)
-            p.setLabel("bottom", "PRM Angle (deg)", color="#333333")
-            p.setLabel("left", "Power (mW)", color="#333333")
+            p.showGrid(x=True, y=True, alpha=0.35)
+            p.setLabel("bottom", "Angle (deg)", color="#333333")
+            p.setLabel("left", "Power (dBm)", color="#333333")
             axis_pen = pg.mkPen(color="#333333", width=1)
             p.getAxis("left").setPen(axis_pen)
             p.getAxis("left").setTextPen(axis_pen)
             p.getAxis("bottom").setPen(axis_pen)
             p.getAxis("bottom").setTextPen(axis_pen)
+            # Solid line only (reference: blue Malus-style curve, no scatter markers)
             self._curve = pw.plot(
                 [], [],
-                pen=pg.mkPen("#00AA00", width=2),
-                symbol="o",
-                symbolSize=5,
-                symbolBrush="#00AA00",
+                pen=pg.mkPen("#1f77b4", width=1.5),
+                antialias=True,
             )
             right_layout.addWidget(pw, 1)
 
-        self._result_label = QLabel("Max: —   Min: —   PER: —   Angle: —")
+        self._result_label = QLabel("Max (dBm): —   Min (dBm): —   PER (dB): —   Angle (°): —")
         self._result_label.setStyleSheet("color: #c8c8c8; font-size: 11px;")
         right_layout.addWidget(self._result_label)
         main_layout.addWidget(right_widget, 1)
@@ -194,18 +194,18 @@ class PerTestSequenceWindow(QMainWindow):
         n = min(len(self._angles), len(self._powers_mw))
 
         if self._curve is not None and n:
-            self._curve.setData(
-                self._rolling(self._angles[:n]),
-                self._rolling(self._powers_mw[:n]),
-            )
+            y_dbm = mw_series_to_dbm(self._rolling(self._powers_mw[:n]))
+            self._curve.setData(self._rolling(self._angles[:n]), y_dbm)
         if result is not None:
             mx = getattr(result, "max_power", None)
             mn = getattr(result, "min_power", None)
             pd = getattr(result, "per_db", None)
             ag = getattr(result, "max_angle", None)
+            mx_d = _fmt(mw_to_dbm(float(mx))) if mx is not None else "—"
+            mn_d = _fmt(mw_to_dbm(float(mn))) if mn is not None else "—"
             self._result_label.setText(
-                "Max (mW): {}   Min (mW): {}   PER (dB): {}   Angle (°): {}".format(
-                    _fmt(mx), _fmt(mn), _fmt(pd), _fmt(ag)
+                "Max (dBm): {}   Min (dBm): {}   PER (dB): {}   Angle (°): {}".format(
+                    mx_d, mn_d, _fmt(pd), _fmt(ag)
                 )
             )
             if bool(getattr(result, "is_final", False)):
@@ -235,4 +235,3 @@ class PerTestSequenceWindow(QMainWindow):
         pl.appendPlainText(t)
         sb = pl.verticalScrollBar()
         sb.setValue(sb.maximum())
-

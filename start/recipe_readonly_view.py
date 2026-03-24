@@ -1,18 +1,11 @@
 """
 Read-only recipe view: same layout as New Recipe window (RecipeWindow).
-All fields non-editable; layout matches RecipeWindow (GENERAL, PER, LIV, SPECTRUM, Temperature Stability).
+All fields non-editable; layout matches RecipeWindow (GENERAL, PER, LIV, SPECTRUM, TEMP STABILITY).
 Always shows full layout; values empty when no recipe loaded, filled when recipe loaded.
 """
 import json
 
 from operations.recipe_normalize import normalize_loaded_recipe
-from operations.recipe_ts_helpers import (
-    first_in_dict,
-    first_or_fallback,
-    resolve_temperature_stability_blocks,
-    wait_time_ms_for_display,
-)
-
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -108,7 +101,7 @@ class RecipeReadonlyView(QWidget):
         self._build_per_tab()
         self._build_liv_tab()
         self._build_spectrum_tab()
-        self._build_temp_stability_tab()
+        self._build_temperature_stability_tab()
         layout.addWidget(self._tab_widget)
         self.setAutoFillBackground(True)
         # Scroll area viewports default to light Base on Fusion — force dark so tab does not flash white while scrolling.
@@ -470,64 +463,152 @@ class RecipeReadonlyView(QWidget):
         vl.addWidget(sub)
         self._tab_widget.addTab(tab, "SPECTRUM")
 
-    def _build_temp_stability_tab(self):
+    def _build_ts_slot_readonly(self, slot: int) -> QWidget:
+        """One TS block: Control | Ando + offsets/deg | Limits + Save PDF (matches RecipeWindow)."""
+        px = "ts{}.".format(slot)
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(GROUP_SPACING)
+        three = QHBoxLayout()
+        three.setSpacing(12)
+
+        ctrl = QGroupBox("Control Parameters")
+        ctrl.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        cg = QGridLayout(ctrl)
+        cg.setSpacing(8)
+        cg.setContentsMargins(*GROUP_MARGINS)
+        r = 0
+        cg.addWidget(QLabel("MIN Temp"), r, 0)
+        cg.addWidget(self._w(px + "min_temp", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        r += 1
+        cg.addWidget(QLabel("MAX Temp"), r, 0)
+        cg.addWidget(self._w(px + "max_t", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        r += 1
+        cg.addWidget(QLabel("INC"), r, 0)
+        cg.addWidget(self._w(px + "step", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        r += 1
+        cg.addWidget(QLabel("WAIT TIME"), r, 0)
+        cg.addWidget(self._w(px + "wait_ms", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(QLabel("ms"), r, 2)
+        r += 1
+        cg.addWidget(QLabel("Set Curr"), r, 0)
+        hset = QHBoxLayout()
+        hset.addWidget(self._w(px + "set_curr", _ro_line(INPUT_WIDTH)))
+        hset.addWidget(QLabel("mA"))
+        ur = QCheckBox("Use I@Rated_P")
+        ur.setEnabled(False)
+        hset.addWidget(self._w(px + "use_rated", ur))
+        hset.addStretch()
+        cg.addLayout(hset, r, 1, 1, 2)
+        r += 1
+        cg.addWidget(QLabel("Init Temp"), r, 0)
+        cg.addWidget(self._w(px + "initial", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(QLabel("°C"), r, 2)
+        three.addWidget(ctrl, 1)
+
+        ando = QGroupBox("Ando Parameters")
+        ando.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        ag = QGridLayout(ando)
+        ag.setSpacing(8)
+        ag.setContentsMargins(*GROUP_MARGINS)
+        r = 0
+        ag.addWidget(QLabel("Span"), r, 0)
+        ag.addWidget(self._w(px + "span_nm", _ro_line(INPUT_WIDTH)), r, 1)
+        ag.addWidget(QLabel("nm"), r, 2)
+        r += 1
+        ag.addWidget(QLabel("Sampling"), r, 0)
+        ag.addWidget(self._w(px + "smpl", _ro_line(INPUT_WIDTH)), r, 1)
+        r += 1
+        ccs = QCheckBox("Continuous Scan")
+        ccs.setEnabled(False)
+        ag.addWidget(self._w(px + "continuous_scan", ccs), r, 0, 1, 3)
+
+        mid_col = QWidget()
+        mid_v = QVBoxLayout(mid_col)
+        mid_v.setContentsMargins(0, 0, 0, 0)
+        mid_v.setSpacing(8)
+        mid_v.addWidget(ando)
+        off_row = QHBoxLayout()
+        off_row.setSpacing(10)
+        off_row.addWidget(QLabel("Offset1"))
+        off_row.addWidget(self._w(px + "offset1", _ro_line(INPUT_WIDTH)))
+        off_row.addWidget(QLabel("Offset2"))
+        off_row.addWidget(self._w(px + "offset2", _ro_line(INPUT_WIDTH)))
+        off_row.addSpacing(12)
+        off_row.addWidget(QLabel("Deg of Stability"))
+        off_row.addWidget(self._w(px + "deg_stability", _ro_line(60)))
+        off_row.addStretch()
+        mid_v.addLayout(off_row)
+        three.addWidget(mid_col, 1)
+
+        lim = QGroupBox("Limits")
+        lim.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        lg = QGridLayout(lim)
+        lg.setSpacing(6)
+        lg.setContentsMargins(*GROUP_MARGINS)
+        lg.addWidget(QLabel(""), 0, 0)
+        for c, lab in ((1, "LL"), (2, "UL"), (3, "Enable")):
+            lb = QLabel(lab)
+            lb.setStyleSheet("font-weight: bold;")
+            lg.addWidget(lb, 0, c)
+        for ri, name in enumerate(("FWHM", "SMSR", "Width1", "Width2", "WL", "Power"), start=1):
+            lg.addWidget(QLabel(name), ri, 0)
+            lg.addWidget(self._w(px + "lim_" + name + "_ll", _ro_line(72)), ri, 1)
+            if name == "Power":
+                lg.addWidget(QLabel("—"), ri, 2)
+            else:
+                lg.addWidget(self._w(px + "lim_" + name + "_ul", _ro_line(72)), ri, 2)
+            lg.addWidget(self._w(px + "lim_" + name + "_en", _ro_check()), ri, 3)
+        three.addWidget(lim, 1)
+        vl.addLayout(three)
+
+        foot = QHBoxLayout()
+        spdf = QCheckBox("Save PDF")
+        spdf.setEnabled(False)
+        foot.addWidget(self._w(px + "save_pdf", spdf))
+        foot.addStretch()
+        vl.addLayout(foot)
+        return w
+
+    def _build_temperature_stability_tab(self):
+        """Read-only mirror of RecipeWindow TEMP STABILITY (TS1 / TS2 OPERATIONS blocks)."""
         tab = QWidget()
         tab.setStyleSheet(RO_STYLE)
-        vl = QVBoxLayout(tab)
-        vl.setContentsMargins(15, 15, 15, 15)
-        vl.setSpacing(15)
-        for i, title in enumerate(["Temperature Stability 1", "Temperature Stability 2"]):
-            g = QGroupBox(title)
-            g.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
-            hl = QHBoxLayout(g)
-            hl.setSpacing(GROUP_SPACING)
-            ctrl = QGroupBox("Control Parameters")
-            ctrl.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
-            fl = QFormLayout(ctrl)
-            fl.setSpacing(GROUP_SPACING)
-            fl.setContentsMargins(*GROUP_MARGINS)
-            prefix = "ts1." if i == 0 else "ts2."
-            fl.addRow("MINTemp (C):", self._w(prefix + "min_temp", _ro_line()))
-            fl.addRow("MAXTemp (C):", self._w(prefix + "max_temp", _ro_line()))
-            fl.addRow("INC (C):", self._w(prefix + "inc", _ro_line()))
-            fl.addRow("WAIT TIME (ms):", self._w(prefix + "wait_time", _ro_line()))
-            fl.addRow("Set Curr (mA):", self._w(prefix + "set_curr", _ro_line()))
-            fl.addRow("Init Temp (C):", self._w(prefix + "init_temp", _ro_line()))
-            hl.addWidget(ctrl)
-            ando = QGroupBox("Ando Parameters")
-            ando.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
-            fl2 = QFormLayout(ando)
-            fl2.setSpacing(GROUP_SPACING)
-            fl2.setContentsMargins(*GROUP_MARGINS)
-            fl2.addRow("Span:", self._w(prefix + "span", _ro_line()))
-            fl2.addRow("Sampling:", self._w(prefix + "sampling", _ro_line()))
-            fl2.addRow("Offset1:", self._w(prefix + "offset1", _ro_line()))
-            fl2.addRow("Offset2:", self._w(prefix + "offset2", _ro_line()))
-            hl.addWidget(ando)
-            limits = QGroupBox("Limits")
-            limits.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
-            gl_ts = QGridLayout(limits)
-            gl_ts.setSpacing(GROUP_SPACING)
-            gl_ts.setContentsMargins(*GROUP_MARGINS)
-            gl_ts.addWidget(QLabel("LL"), 0, 1)
-            gl_ts.addWidget(QLabel("UL"), 0, 2)
-            gl_ts.addWidget(QLabel("Enable"), 0, 3)
-            for row, param in enumerate(["FWHM", "SMSR", "Width1", "Width2", "WL", "Power"], 1):
-                pk = param.lower()
-                gl_ts.addWidget(QLabel(param), row, 0)
-                gl_ts.addWidget(self._w(prefix + "lim_" + pk + "_ll", _ro_line(None, 50)), row, 1)
-                gl_ts.addWidget(self._w(prefix + "lim_" + pk + "_ul", _ro_line(None, 50)), row, 2)
-                gl_ts.addWidget(self._w(prefix + "lim_" + pk + "_en", _ro_line(None, 40)), row, 3)
-            hl.addWidget(limits)
-            deg_row = QHBoxLayout()
-            deg_row.addWidget(QLabel("Deg of Stability:"))
-            deg_row.addWidget(self._w(prefix + "deg_stability", _ro_line(None, 40)))
-            deg_row.addStretch()
-            hl.addLayout(deg_row)
-            vl.addWidget(g)
-        vl.addWidget(QLabel("Temperature Stability 2 will only run if Temperature Stability 1 passes."))
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(5, 5, 5, 5)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        vl = QVBoxLayout(inner)
+        vl.setContentsMargins(8, 8, 8, 8)
+        vl.setSpacing(16)
+        t1 = QLabel("Temperature Stability 1")
+        t1.setStyleSheet("font-weight: bold; font-size: 14px; color: #e6e6e6;")
+        vl.addWidget(t1)
+        vl.addWidget(self._build_ts_slot_readonly(1))
+        t2 = QLabel("Temperature Stability 2")
+        t2.setStyleSheet("font-weight: bold; font-size: 14px; color: #e6e6e6;")
+        vl.addWidget(t2)
+        row2 = QHBoxLayout()
+        row2.setSpacing(12)
+        row2.addWidget(self._build_ts_slot_readonly(2), 1)
+        note = QLabel("Temperature Stability 2 will only run if Temperature Stability 1 passes.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #CCCCCC; font-size: 12px; max-width: 220px;")
+        note.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        row2.addWidget(note, 0)
+        wrap = QWidget()
+        wrap.setLayout(row2)
+        vl.addWidget(wrap)
         vl.addStretch()
-        self._tab_widget.addTab(tab, "Temperature Stability")
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+        self._tab_widget.addTab(tab, "TEMP STABILITY")
 
     def _clear_seq_layout(self):
         """Remove all rows from the test sequence area (GENERAL tab)."""
@@ -610,11 +691,6 @@ class RecipeReadonlyView(QWidget):
         wm = get(data, "spec", "WAVEMETER") or get(ops, "WAVEMETER") or get(data, "WAVEMETER") or {}
         if not isinstance(wm, dict):
             wm = {}
-        stab1, stab2, stab = resolve_temperature_stability_blocks(data)
-        if not isinstance(stab1, dict):
-            stab1 = {}
-        if not isinstance(stab2, dict):
-            stab2 = {}
 
         recipe_name = (
             data.get("Recipe_Name")
@@ -751,105 +827,31 @@ class RecipeReadonlyView(QWidget):
         self._set("wm.avg", get(wm, "averaging"))
         self._set("wm.smsr", "Yes" if wm.get("smsr") else "No")
 
-        def fill_ts_limits(prefix: str, block) -> None:
-            if not isinstance(block, dict):
-                return
-            lim = block.get("limits")
-            if not isinstance(lim, dict):
-                return
-            for param in ["FWHM", "SMSR", "Width1", "Width2", "WL", "Power"]:
-                pk = param.lower()
-                sub = lim.get(param) or lim.get(param.replace(" ", "")) or {}
-                if not isinstance(sub, dict):
-                    continue
-                self._set(prefix + "lim_" + pk + "_ll", sub.get("ll", ""))
-                self._set(prefix + "lim_" + pk + "_ul", sub.get("ul", ""))
-                en = sub.get("enable")
-                self._set(prefix + "lim_" + pk + "_en", en if en is not None else "")
-
-        self._set(
-            "ts1.min_temp",
-            first_or_fallback(stab1, ("MinTemp", "min_temp", "MINTemp", "min_temp_c"), stab, ("min_temp",)),
-        )
-        self._set(
-            "ts1.max_temp",
-            first_or_fallback(stab1, ("MaxTemp", "max_temp", "MAXTemp", "max_temp_c"), stab, ("max_temp",)),
-        )
-        self._set(
-            "ts1.inc",
-            first_or_fallback(
-                stab1,
-                ("TempIncrement", "INC", "inc", "TempIncrement_c", "increment_c"),
-                stab,
-                ("inc",),
-            ),
-        )
-        self._set("ts1.wait_time", wait_time_ms_for_display(stab1, stab))
-        self._set(
-            "ts1.set_curr",
-            first_or_fallback(
-                stab1,
-                ("Current", "current", "SetCurr", "set_curr", "laser_current_mA"),
-                stab,
-                ("current",),
-            ),
-        )
-        self._set(
-            "ts1.init_temp",
-            first_or_fallback(
-                stab1,
-                ("InitTemp", "Init_Temp", "InitialTemp", "initial_temp_c", "MinTemp"),
-                stab,
-                ("temperature",),
-            ),
-        )
-        self._set("ts1.span", first_in_dict(stab1, ("Span", "span_nm", "WideSpan_nm")))
-        self._set("ts1.sampling", first_in_dict(stab1, ("Sampling", "sampling_points", "sampling")))
-        self._set("ts1.offset1", first_in_dict(stab1, ("Offset1", "offset1")))
-        self._set("ts1.offset2", first_in_dict(stab1, ("Offset2", "offset2")))
-        self._set("ts2.min_temp", first_in_dict(stab2, ("MinTemp", "min_temp", "MINTemp")))
-        self._set("ts2.max_temp", first_in_dict(stab2, ("MaxTemp", "max_temp", "MAXTemp")))
-        self._set("ts2.inc", first_in_dict(stab2, ("TempIncrement", "INC", "inc", "TempIncrement_c")))
-        self._set("ts2.wait_time", wait_time_ms_for_display(stab2, stab))
-        self._set(
-            "ts2.set_curr",
-            first_in_dict(stab2, ("Current", "current", "SetCurr", "set_curr", "laser_current_mA")),
-        )
-        self._set("ts2.init_temp", first_in_dict(stab2, ("InitTemp", "Init_Temp", "InitialTemp", "initial_temp_c", "MinTemp")))
-        self._set("ts2.span", first_in_dict(stab2, ("Span", "span_nm", "WideSpan_nm")))
-        self._set("ts2.sampling", first_in_dict(stab2, ("Sampling", "sampling_points", "sampling")))
-        self._set("ts2.offset1", first_in_dict(stab2, ("Offset1", "offset1")))
-        self._set("ts2.offset2", first_in_dict(stab2, ("Offset2", "offset2")))
-        self._set(
-            "ts1.deg_stability",
-            first_in_dict(
-                stab1,
-                (
-                    "DegOfStability",
-                    "deg_stability",
-                    "Deg of Stability",
-                    "DegOfStability_c",
-                    "WavelengthTolerance_nm",
-                    "wavelength_tolerance_nm",
-                ),
-            ),
-        )
-        self._set(
-            "ts2.deg_stability",
-            first_in_dict(
-                stab2,
-                (
-                    "DegOfStability",
-                    "deg_stability",
-                    "Deg of Stability",
-                    "DegOfStability_c",
-                    "WavelengthTolerance_nm",
-                    "wavelength_tolerance_nm",
-                ),
-            ),
-        )
-        fill_ts_limits("ts1.", stab1)
-        fill_ts_limits("ts2.", stab2)
+        for slot in (1, 2):
+            key = "Temperature Stability {}".format(slot)
+            ts = ops.get(key) if isinstance(ops.get(key), dict) else {}
+            px = "ts{}.".format(slot)
+            self._set(px + "min_temp", ts.get("MinTemp", ts.get("min_temp_c", ts.get("MINTemp", ""))))
+            self._set(px + "max_t", ts.get("MaxTemperature", ts.get("max_temp_c", "")))
+            self._set(px + "step", ts.get("TemperatureStep", ts.get("step_temp_c", "")))
+            self._set(px + "wait_ms", ts.get("WaitTime_ms", ts.get("wait_time_ms", "")))
+            self._set(px + "set_curr", ts.get("SetCurrent_mA", ts.get("set_current_mA", "")))
+            self._set(px + "use_rated", ts.get("UseI_at_Rated_P", ts.get("use_I_at_rated", False)))
+            self._set(px + "initial", ts.get("InitialTemperature", ts.get("initial_temp_c", "")))
+            self._set(px + "span_nm", ts.get("StabilitySpan_nm", ts.get("span_nm", "")))
+            self._set(px + "smpl", ts.get("StabilitySampling", ts.get("sampling_points", "")))
+            self._set(px + "continuous_scan", ts.get("ContinuousScan", ts.get("continuous_scan", False)))
+            self._set(px + "offset1", ts.get("Offset1_nm", ts.get("offset1", "")))
+            self._set(px + "offset2", ts.get("Offset2_nm", ts.get("offset2", "")))
+            self._set(px + "save_pdf", ts.get("SavePDF", ts.get("save_pdf", False)))
+            self._set(px + "deg_stability", ts.get("DegOfStability", ts.get("deg_of_stability", "")))
+            lim_src = ts.get("limits") if isinstance(ts.get("limits"), dict) else {}
+            for name in ("FWHM", "SMSR", "Width1", "Width2", "WL", "Power"):
+                sub = lim_src.get(name) if isinstance(lim_src.get(name), dict) else {}
+                self._set(px + "lim_" + name + "_ll", sub.get("ll", sub.get("LL", "")))
+                if name != "Power":
+                    self._set(px + "lim_" + name + "_ul", sub.get("ul", sub.get("UL", "")))
+                self._set(px + "lim_" + name + "_en", sub.get("enable", sub.get("Enable", False)))
 
         # LIV pass/fail grid: fill from OPERATIONS.LIV.limits when present (widget keys match _build_liv_tab).
         liv_lim = liv.get("limits") if isinstance(liv, dict) and isinstance(liv.get("limits"), dict) else {}
