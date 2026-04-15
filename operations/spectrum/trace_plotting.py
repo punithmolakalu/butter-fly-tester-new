@@ -34,6 +34,29 @@ def spectrum_plot_y_range_dbm(
     return y_bot, y_top
 
 
+def spectrum_wavemeter_bottom_axis_label(
+    wavelength_nm: Optional[Any],
+    *,
+    default: str = "Wavelength (nm)",
+) -> str:
+    """
+    Text for the plot bottom axis: the wavemeter wavelength in nm with up to 12 fractional digits
+    (trailing zeros trimmed). Tick values stay trace wavelengths; only this title shows the reading.
+    """
+    if wavelength_nm is None:
+        return default
+    try:
+        x = float(wavelength_nm)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(x):
+        return default
+    s = ("{:.12f}".format(x)).rstrip("0").rstrip(".")
+    if s in ("", "-", "-0"):
+        return default
+    return "{} nm".format(s)
+
+
 def pair_trace_floats(wdata: Any, ldata: Any) -> Tuple[List[float], List[float]]:
     """
     Convert instrument traces (list, tuple, numpy 1-D, etc.) to aligned ``List[float]`` for plotting.

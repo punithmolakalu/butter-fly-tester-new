@@ -1,13 +1,19 @@
 """
-Runs recipe TEST_SEQUENCE in order. When step is LIV, runs full LIV process (operations.LIV.liv_core)
+Runs recipe TEST_SEQUENCE in order. When step is LIV, runs full LIV process (operations.liv.liv_core)
 with bridge instruments and emits liv_process_window_requested, liv_pre_start_prompt_requested,
 alignment_window_requested, liv_test_result, etc., so the main window's connections work.
 """
 from PyQt5.QtCore import pyqtSignal, QObject, QThread, QMetaObject, Qt
-import os
-import sys
 import threading
-from typing import Any, List, Optional
+from typing import Any, List, Optional, cast
+
+try:
+    from operations.result_saver import ResultSession
+except ImportError:
+    ResultSession = None  # type: ignore
+
+# PyQt5 stubs omit ConnectionType members on Qt; cast keeps strict checkers quiet.
+QtCompat: Any = cast(Any, Qt)
 
 try:
     from operations.stability.stability_process import TemperatureStabilityParameters, TemperatureStabilityProcess
@@ -17,14 +23,11 @@ except ImportError:
 
 # Full LIV process (sweep + Thorlabs + pass/fail + executor callbacks)
 try:
-    from operations.LIV.liv_core import LIVMain, LIVMainParameters, LIVProcessResult
+    from operations.liv.liv_core import LIVMain, LIVMainParameters, LIVProcessResult
 except ImportError:
-    try:
-        from operations.liv.liv_core import LIVMain, LIVMainParameters, LIVProcessResult
-    except ImportError:
-        LIVMain = None  # type: ignore
-        LIVMainParameters = None  # type: ignore
-        LIVProcessResult = None  # type: ignore
+    LIVMain = None  # type: ignore
+    LIVMainParameters = None  # type: ignore
+    LIVProcessResult = None  # type: ignore
 
 from operations.arroyo_laser_helpers import (
     apply_arroyo_recipe_and_laser_on_for_per,
@@ -37,21 +40,18 @@ from operations.arroyo_laser_helpers import (
 def _stability_slot_from_test_name(name: str) -> Optional[int]:
     """Map TEST_SEQUENCE label to slot 1 or 2 (Temperature Stability 1 / 2)."""
     t = (name or "").strip().upper()
-    if "STABILITY 2" in t or t == "TS2":
+    # Check slot 2 before 1 so labels like "TEMP STABILITY 2" match reliably.
+    if "STABILITY 2" in t or t in ("TS2", "TS 2"):
         return 2
-    if "STABILITY 1" in t or t == "TS1":
+    if "STABILITY 1" in t or t in ("TS1", "TS 1"):
         return 1
     return None
 
 try:
-    # Actual path: operations/per/PER_PROCESS.py (lowercase package, uppercase module name)
     from operations.per.PER_PROCESS import PERProcess, PERProcessParameters
 except ImportError:
-    try:
-        from operations.PER.PER_PROCESS import PERProcess, PERProcessParameters
-    except ImportError:
-        PERProcess = None  # type: ignore
-        PERProcessParameters = None  # type: ignore
+    PERProcess = None  # type: ignore
+    PERProcessParameters = None  # type: ignore
 
 try:
     from operations.spectrum.spectrum_process import SpectrumProcess, SpectrumProcessParameters
@@ -61,6 +61,16 @@ except ImportError:
     except ImportError:
         SpectrumProcess = None  # type: ignore
         SpectrumProcessParameters = None  # type: ignore
+
+
+def _post_pause_poll_settle() -> None:
+    """After main-thread timers are stopped, wait on the **sequence worker** thread (not the GUI).
+
+    Previously ``time.sleep`` ran inside ``pause_for_liv`` on the main thread (via
+    ``BlockingQueuedConnection``), which froze the window for ~750 ms per LIV/PER/Spectrum pause.
+    """
+    QThread.msleep(750)
+
 
 class TestSequenceExecutor(QObject):
     log_message = pyqtSignal(str)
@@ -77,8 +87,8 @@ class TestSequenceExecutor(QObject):
     liv_pre_start_prompt_requested = pyqtSignal(str, dict)
     alignment_window_requested = pyqtSignal()
     liv_plot_clear = pyqtSignal()
-    # current (mA), Gentec power (mW), laser voltage LAS:LDV (V), monitor diode LAS:MDI (raw instrument units)
-    liv_plot_update = pyqtSignal(float, float, float, float)
+    # current (mA), Gentec power (mW), laser voltage LAS:LDV (V), monitor diode LAS:MDI (raw), TEC temp (°C, NaN if unknown)
+    liv_plot_update = pyqtSignal(float, float, float, float, float)
     liv_power_reading_update = pyqtSignal(float, float)  # gentec_mW, thorlabs_mW
     per_process_window_requested = pyqtSignal(dict)
     spectrum_process_window_requested = pyqtSignal(dict)  # RCP summary for secondary Spectrum window
@@ -86,7 +96,14 @@ class TestSequenceExecutor(QObject):
     spectrum_wavemeter_reading = pyqtSignal(object)  # wavelength nm or None
     spectrum_step_status = pyqtSignal(str)  # first/second sweep status for Spectrum window + log
     stability_log_message = pyqtSignal(str)
-    stability_live_point = pyqtSignal(float, float, float, float)  # T °C, FWHM nm, SMSR dB, peak nm
+    # T °C, FWHM nm, SMSR dB, peak nm, peak dBm (Ando), Thorlabs mW, ramp "c_h"|"h_c" (cold→hot vs hot→cold)
+    stability_live_point = pyqtSignal(float, float, float, float, float, float, str)
+    # Same keys as ArroyoWorker.read_all — emitted on worker thread after each live point for Main Laser/TEC.
+    stability_live_arroyo = pyqtSignal(dict)
+    # Same keys as ArroyoWorker.read_all — emitted during LIV so Main Laser/TEC Details stay live.
+    liv_live_arroyo = pyqtSignal(dict)
+    # Generic Arroyo snapshot for ALL tests (LIV, PER, Spectrum, Stability) — Main tab Laser/TEC Details.
+    live_arroyo = pyqtSignal(dict)
     stability_test_result = pyqtSignal(object)
     # Step name + list of reason strings for Main tab "Reason for Failure" (worker thread → UI).
     sequence_step_failed = pyqtSignal(str, object)
@@ -99,6 +116,12 @@ class TestSequenceExecutor(QObject):
         self._test_sequence: List[str] = []
         self._instrument_manager: Any = None
         self._stop_requested = False
+        # True only when stop() was called (user Stop) — laser-interlock abort clears this so session is not "stopped_by_user".
+        self._stop_from_user = False
+        # While True, worker polls Arroyo laser output; explicit OFF aborts the sequence (hardware / interlock).
+        self._laser_monitor_armed = False
+        self._laser_abort_emitted = False
+        self._laser_abort_step = ""
         # Set True when run() exits because user pressed Stop (so UI shows Stopped, not Done/Fail).
         self._sequence_stopped_by_user = False
         # Conditions for LIV prompts / alignment (main thread acks via slots)
@@ -107,8 +130,12 @@ class TestSequenceExecutor(QObject):
         self._connect_fiber_ack: Optional[bool] = None
         self._alignment_condition = threading.Condition()
         self._alignment_ack: Optional[bool] = None
-        # Which Temperature Stability slot (1/2) is running — used by Plot tab live mirror.
+        # Which Temperature Stability slot (1/2) is running — used for stability step bookkeeping.
         self._stability_live_slot: Optional[int] = None
+        # PER live window: main thread reads this in _prepare_per_test_window_before_per_run (BlockingQueuedConnection).
+        self._pending_per_window_params: Optional[dict] = None
+        # Steps in TEST_SEQUENCE still to run after the current step finishes (0 = last or only step).
+        self._tests_remaining_after_current_step: int = 0
 
     def set_test_sequence(self, test_sequence: Any, recipe: Any) -> None:
         if isinstance(test_sequence, (list, tuple)):
@@ -132,6 +159,17 @@ class TestSequenceExecutor(QObject):
     def set_instrument_manager(self, manager: Any) -> None:
         self._instrument_manager = manager
 
+    def _emit_arroyo_snapshot(self, arroyo: Any) -> None:
+        """Read full Arroyo state and emit live_arroyo so Main tab Laser/TEC Details update."""
+        if arroyo is None or not getattr(arroyo, "is_connected", lambda: False)():
+            return
+        try:
+            snap = arroyo.read_gui_snapshot()
+            if isinstance(snap, dict):
+                self.live_arroyo.emit(snap)
+        except Exception:
+            pass
+
     def _emit_step_failed(self, test_name: str, reasons: Any) -> None:
         """Push failure text to the Main window Reason for Failure box (via signal)."""
         if isinstance(reasons, (list, tuple)):
@@ -144,6 +182,58 @@ class TestSequenceExecutor(QObject):
 
     def stop(self) -> None:
         self._stop_requested = True
+        self._stop_from_user = True
+
+    def notify_laser_monitor_armed(self, armed: bool) -> None:
+        """Called from LIV / Spectrum / Stability after laser is ON; cleared before intentional laser OFF."""
+        self._laser_monitor_armed = bool(armed)
+
+    def _arroyo_laser_readback_is_off(self) -> bool:
+        """True only when Arroyo is connected and LAS:OUT readback is explicitly not ON (interlock / local OFF)."""
+        bridge = getattr(self, "_bridge", None)
+        if bridge is None:
+            return False
+        ar = bridge.get_arroyo()
+        if ar is None or not getattr(ar, "is_connected", lambda: False)():
+            return False
+        try:
+            rd = getattr(ar, "laser_read_output", None)
+            if not callable(rd):
+                return False
+            v = rd()
+            if v is None:
+                return False
+            return int(v) != 1
+        except Exception:
+            return False
+
+    def _fire_laser_off_abort(self) -> None:
+        if getattr(self, "_laser_abort_emitted", False):
+            return
+        self._laser_abort_emitted = True
+        self._stop_requested = True
+        self._stop_from_user = False
+        step = (getattr(self, "_laser_abort_step", None) or "").strip() or "TEST_SEQUENCE"
+        msg = (
+            "Arroyo laser output went OFF during {!r} — test sequence aborted "
+            "(hardware OFF, interlock, or controller fault).".format(step)
+        )
+        try:
+            self.log_message.emit("STOP: " + msg)
+        except Exception:
+            pass
+        self._emit_step_failed(step, [msg])
+
+    def _stop_requested_or_laser_off(self) -> bool:
+        """Use as stop_requested for PER / Spectrum / Stability (and LIV via liv_core)."""
+        if bool(getattr(self, "_stop_requested", False)):
+            return True
+        if not bool(getattr(self, "_laser_monitor_armed", False)):
+            return False
+        if self._arroyo_laser_readback_is_off():
+            self._fire_laser_off_abort()
+            return True
+        return False
 
     def ack_liv_pre_start_prompt(self) -> None:
         with self._liv_prompt_condition:
@@ -170,25 +260,106 @@ class TestSequenceExecutor(QObject):
             self._alignment_condition.notify_all()
 
     def get_liv_alignment_params(self) -> Optional[tuple]:
-        """Return (min_current, max_current, temperature) for alignment window."""
+        """Return (min_current, max_current, temperature) for alignment window (LIV RCP keys + MINCurr/MAXCurr)."""
         r = self._recipe
         if not r:
             return None
         op = (r.get("OPERATIONS") or r.get("operations")) or {}
         liv = (op.get("LIV") or op.get("liv")) or {}
-        def f(k: str, default: float = 0.0) -> float:
-            v = liv.get(k)
+
+        def pick(keys: tuple, default: float) -> float:
+            for k in keys:
+                v = liv.get(k)
+                if v is None or v == "":
+                    continue
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+            return default
+
+        return (
+            pick(("min_current_mA", "MINCurr"), 0.0),
+            pick(("max_current_mA", "MAXCurr"), 500.0),
+            pick(("temperature", "Temperature"), 25.0),
+        )
+
+    def is_liv_fiber_coupled(self) -> bool:
+        """Same as LIV recipe FiberCoupled (default True): fiber path uses Thorlabs + alignment before sweep."""
+        r = self._recipe
+        if not isinstance(r, dict):
+            return True
+        gen = r.get("GENERAL") or r.get("General") or {}
+        if isinstance(gen, dict) and isinstance(gen.get("FiberCoupled"), bool):
+            return bool(gen["FiberCoupled"])
+        v = r.get("FiberCoupled")
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return True
+
+    def _ensure_arroyo_laser_off_after_step(self, _step_label: str) -> None:
+        """Turn Arroyo laser off after a sequence step (safety); refresh Main GUI readbacks. No status-log line — pass/fail reasons use Reason for Failure only."""
+        bridge = getattr(self, "_bridge", None)
+        if bridge is None:
+            return
+        arroyo = bridge.get_arroyo()
+        if arroyo is None:
+            return
+        try:
+            if not getattr(arroyo, "is_connected", lambda: False)():
+                return
+        except Exception:
+            return
+        try:
+            arroyo_laser_off(arroyo)
+        except Exception:
+            pass
+        mw = getattr(self, "main_window", None)
+        if mw is not None and hasattr(mw, "refresh_arroyo_after_worker_laser_off"):
             try:
-                return float(v) if v is not None else default
-            except (TypeError, ValueError):
-                return default
-        return (f("min_current_mA", 0), f("max_current_mA", 500), f("temperature", 25))
+                QMetaObject.invokeMethod(
+                    mw,
+                    "refresh_arroyo_after_worker_laser_off",
+                    QtCompat.QueuedConnection,
+                )
+            except Exception:
+                pass
+
+    def _more_tests_follow_in_sequence(self) -> bool:
+        """True when at least one further TEST_SEQUENCE entry will run after the current step."""
+        try:
+            return int(getattr(self, "_tests_remaining_after_current_step", 0) or 0) > 0
+        except Exception:
+            return False
+
+    def _log_to_session(self, msg: str) -> None:
+        s = getattr(self, "_result_session", None)
+        if s is not None:
+            s.append_log(msg)
+
+    def _ensure_placeholder_result(self, stem: str, message: str) -> None:
+        """If ``stem`` has no saved JSON yet, write a minimal placeholder (failed prereq, save error, etc.)."""
+        s = getattr(self, "_result_session", None)
+        if s is None:
+            return
+        try:
+            if s.has_result(stem):
+                return
+            s.ensure_placeholder_result(stem, [message])
+        except Exception:
+            pass
 
     def run(self) -> bool:
         """Run TEST_SEQUENCE in order; return True if all steps passed."""
         self._stop_requested = False
+        self._stop_from_user = False
+        self._laser_monitor_armed = False
+        self._laser_abort_emitted = False
+        self._laser_abort_step = ""
         self._sequence_stopped_by_user = False
-        self.log_message.emit("Starting test sequence...")
+        self.log_message.emit("Starting test sequence…")
         if not self._test_sequence or self._recipe is None:
             self.log_message.emit("No test sequence or recipe loaded.")
             self._emit_step_failed(
@@ -197,70 +368,207 @@ class TestSequenceExecutor(QObject):
             )
             return False
 
-        all_passed = True
         recipe = self._recipe if isinstance(self._recipe, dict) else {}
+        recipe_name = ""
+        mw = getattr(self, "main_window", None)
+        if mw is not None:
+            try:
+                rp = getattr(mw, "_current_recipe_path", None) or getattr(mw, "_recipe_tab_path", None) or ""
+                if rp:
+                    from pathlib import Path as _P
+                    recipe_name = _P(str(rp)).stem
+            except Exception:
+                pass
+        if not recipe_name:
+            recipe_name = str(recipe.get("name", recipe.get("GENERAL", {}).get("name", "unknown")))
 
-        seq_list = [str(x) for x in self._test_sequence]
-        ts1_in_sequence = any(_stability_slot_from_test_name(x) == 1 for x in seq_list)
-        ts1_passed: Optional[bool] = None
+        session: Any = None
+        if ResultSession is None:
+            self.log_message.emit(
+                "Note: result archive is disabled (could not import operations.result_saver); nothing is written under results/."
+            )
+        else:
+            try:
+                session = ResultSession(recipe_name, recipe_data=recipe, test_sequence=list(self._test_sequence))
+            except Exception as ex:
+                session = None
+                self.log_message.emit("Could not create result session (results not saved): {}".format(ex))
+        self._result_session = session
 
-        for test_name in self._test_sequence:
-            if self._stop_requested:
-                self._sequence_stopped_by_user = True
-                self.log_message.emit("STOP: Test sequence aborted by user.")
-                return False
-            name_upper = (test_name or "").strip().upper()
-            if not name_upper:
-                continue
-            stab_slot = _stability_slot_from_test_name(str(test_name))
-            if stab_slot is not None:
-                if stab_slot == 2 and ts1_in_sequence and ts1_passed is False:
-                    self.log_message.emit("Temperature Stability 2 skipped (Temperature Stability 1 did not pass).")
+        log_connections: list = []
+        if session is not None:
+            def _make_log_slot(prefix: str):
+                def _slot(msg: str) -> None:
+                    session.append_log("[{}] {}".format(prefix, msg))
+                return _slot
+            for sig_name, prefix in (
+                ("log_message", "SEQ"), ("liv_log_message", "LIV"),
+                ("per_log_message", "PER"), ("spectrum_log_message", "SPEC"),
+                ("stability_log_message", "TS"),
+            ):
+                sig = getattr(self, sig_name, None)
+                if sig is not None:
+                    slot = _make_log_slot(prefix)
+                    try:
+                        sig.connect(slot)
+                        log_connections.append((sig, slot))
+                    except Exception:
+                        pass
+
+        try:
+            seq_human = ", ".join(str(x).strip() for x in self._test_sequence if str(x).strip())
+        except Exception:
+            seq_human = ""
+        if seq_human:
+            self.log_message.emit("Sequence order: {}.".format(seq_human))
+
+        all_passed = True
+        try:
+            seq_list = [str(x) for x in self._test_sequence]
+            ts1_in_sequence = any(_stability_slot_from_test_name(x) == 1 for x in seq_list)
+            ts1_passed: Optional[bool] = None
+            nseq = len(self._test_sequence)
+
+            for idx, test_name in enumerate(self._test_sequence):
+                self._tests_remaining_after_current_step = max(0, nseq - idx - 1)
+                if self._stop_requested:
+                    if bool(getattr(self, "_stop_from_user", False)):
+                        self._sequence_stopped_by_user = True
+                        self.log_message.emit("STOP: Test sequence aborted by user.")
+                        self.log_message.emit(
+                            "Sequence: stopped by user — step {} of {} not started or not completed.".format(
+                                idx + 1, nseq
+                            )
+                        )
+                    all_passed = False
+                    break
+                self._laser_abort_step = str(test_name).strip() or "TEST_SEQUENCE"
+                name_upper = (test_name or "").strip().upper()
+                if not name_upper:
+                    continue
+                stab_slot = _stability_slot_from_test_name(str(test_name))
+                if stab_slot is not None:
+                    if stab_slot == 2 and ts1_in_sequence and ts1_passed is False:
+                        self.log_message.emit(
+                            "Sequence: {!r} skipped — Temperature Stability 1 did not pass.".format(
+                                str(test_name).strip()
+                            )
+                        )
+                        self.log_message.emit("Temperature Stability 2 skipped (Temperature Stability 1 did not pass).")
+                        self._emit_step_failed(
+                            str(test_name),
+                            ["Temperature Stability 2 skipped because Temperature Stability 1 did not pass."],
+                        )
+                        all_passed = False
+                        if session is not None:
+                            session.ensure_placeholder_result(
+                                "ts2",
+                                ["Temperature Stability 2 skipped because Temperature Stability 1 did not pass."],
+                            )
+                        continue
+                    self.log_message.emit("Sequence: {!r} started.".format(str(test_name).strip()))
+                    self.stability_log_message.emit("Starting {}…".format(test_name))
+                    step_ok = self._run_temperature_stability(recipe, stab_slot, str(test_name))
+                    if stab_slot == 1:
+                        ts1_passed = step_ok
+                    if not step_ok:
+                        all_passed = False
+                    self.log_message.emit(
+                        "Sequence: {!r} finished — {}.".format(
+                            str(test_name).strip(), "PASS" if step_ok else "FAIL"
+                        )
+                    )
+                    self.stability_log_message.emit("{} completed.".format(test_name))
+                    self._ensure_placeholder_result(
+                        "ts{}".format(int(stab_slot)),
+                        "Temperature Stability finished without a saved measurement payload.",
+                    )
+                    continue
+                if name_upper == "LIV":
+                    self.log_message.emit("Sequence: {!r} started.".format(str(test_name).strip()))
+                    self.liv_log_message.emit("Starting LIV test…")
+                    step_ok = self._run_liv(recipe)
+                    if not step_ok:
+                        all_passed = False
+                    self.log_message.emit(
+                        "Sequence: {!r} finished — {}.".format(
+                            str(test_name).strip(), "PASS" if step_ok else "FAIL"
+                        )
+                    )
+                    self.liv_log_message.emit("LIV test completed.")
+                    self._ensure_placeholder_result(
+                        "liv",
+                        "LIV did not write a measurement file (failed before sweep, stopped, or save error).",
+                    )
+                elif name_upper == "PER":
+                    self.log_message.emit("Sequence: {!r} started.".format(str(test_name).strip()))
+                    self.per_log_message.emit("Starting PER test…")
+                    step_ok = self._run_per(recipe)
+                    if not step_ok:
+                        all_passed = False
+                    self.log_message.emit(
+                        "Sequence: {!r} finished — {}.".format(
+                            str(test_name).strip(), "PASS" if step_ok else "FAIL"
+                        )
+                    )
+                    self.per_log_message.emit("PER test completed.")
+                    self._ensure_placeholder_result(
+                        "per",
+                        "PER did not write a measurement file (failed before sweep, stopped, or save error).",
+                    )
+                elif name_upper == "SPECTRUM":
+                    self.log_message.emit("Sequence: {!r} started.".format(str(test_name).strip()))
+                    self.spectrum_log_message.emit("Starting Spectrum test…")
+                    step_ok = self._run_spectrum(recipe)
+                    if not step_ok:
+                        all_passed = False
+                    self.log_message.emit(
+                        "Sequence: {!r} finished — {}.".format(
+                            str(test_name).strip(), "PASS" if step_ok else "FAIL"
+                        )
+                    )
+                    self.spectrum_log_message.emit("Spectrum test completed.")
+                    self._ensure_placeholder_result(
+                        "spectrum",
+                        "Spectrum did not write a measurement file (failed before sweep, stopped, or save error).",
+                    )
+                else:
+                    self.log_message.emit("Sequence: {!r} started.".format(str(test_name).strip()))
+                    self.log_message.emit(f"Test {test_name} not implemented.")
                     self._emit_step_failed(
                         str(test_name),
-                        ["Temperature Stability 2 skipped because Temperature Stability 1 did not pass."],
+                        ["Test type {!r} is not implemented.".format(test_name)],
+                    )
+                    self.log_message.emit(
+                        "Sequence: {!r} finished — FAIL (not implemented).".format(str(test_name).strip())
                     )
                     all_passed = False
-                    continue
-                self.stability_log_message.emit("Starting {}…".format(test_name))
-                step_ok = self._run_temperature_stability(recipe, stab_slot, str(test_name))
-                if stab_slot == 1:
-                    ts1_passed = step_ok
-                if not step_ok:
-                    all_passed = False
-                self.stability_log_message.emit("{} completed.".format(test_name))
-                continue
-            if name_upper == "LIV":
-                self.liv_log_message.emit("Starting LIV test…")
-                step_ok = self._run_liv(recipe)
-                if not step_ok:
-                    all_passed = False
-                self.liv_log_message.emit("LIV test completed.")
-            elif name_upper == "PER":
-                self.per_log_message.emit("Starting PER test…")
-                step_ok = self._run_per(recipe)
-                if not step_ok:
-                    all_passed = False
-                self.per_log_message.emit("PER test completed.")
-            elif name_upper == "SPECTRUM":
-                self.spectrum_log_message.emit("Starting Spectrum test…")
-                step_ok = self._run_spectrum(recipe)
-                if not step_ok:
-                    all_passed = False
-                self.spectrum_log_message.emit("Spectrum test completed.")
-            else:
-                self.log_message.emit(f"Test {test_name} not implemented.")
-                self._emit_step_failed(
-                    str(test_name),
-                    ["Test type {!r} is not implemented.".format(test_name)],
-                )
+
+            self._ensure_arroyo_laser_off_after_step("sequence end")
+
+            if self._stop_requested:
                 all_passed = False
 
-        # If Stop was pressed while the last step was running, we never re-enter the loop.
-        if self._stop_requested:
-            self._sequence_stopped_by_user = True
-            self.log_message.emit("STOP: Test sequence aborted by user.")
-            return False
+            if getattr(self, "_sequence_stopped_by_user", False):
+                self.log_message.emit("Sequence: test run ended — STOPPED BY USER (results saved if possible).")
+            elif all_passed:
+                self.log_message.emit("Sequence: test run ended — ALL STEPS PASSED (results saved if possible).")
+            else:
+                self.log_message.emit("Sequence: test run ended — ONE OR MORE STEPS FAILED (results saved if possible).")
+
+        finally:
+            for sig, slot in log_connections:
+                try:
+                    sig.disconnect(slot)
+                except Exception:
+                    pass
+            if session is not None:
+                try:
+                    session.set_overall(all_passed, stopped=bool(self._sequence_stopped_by_user))
+                    session.save()
+                except Exception as e:
+                    self.log_message.emit("Could not save results: {}".format(e))
+            self._result_session = None
 
         return all_passed
 
@@ -291,7 +599,8 @@ class TestSequenceExecutor(QObject):
         # Pause UI polling on main thread (timers cannot be stopped from this worker thread)
         mw = getattr(self, "main_window", None)
         if mw is not None and hasattr(mw, "pausePollingForLiv"):
-            QMetaObject.invokeMethod(mw, "pausePollingForLiv", Qt.BlockingQueuedConnection)
+            QMetaObject.invokeMethod(mw, "pausePollingForLiv", QtCompat.BlockingQueuedConnection)
+            _post_pause_poll_settle()
         try:
             params = LIVMainParameters.from_recipe(recipe_dict)
             if not isinstance(params, LIVMainParameters):
@@ -314,15 +623,31 @@ class TestSequenceExecutor(QObject):
                 ando=ando,
             )
             result = liv.run(params, executor=self, recipe=recipe_dict)
-            return bool(result.passed)
+            s = getattr(self, "_result_session", None)
+            if s is not None:
+                try:
+                    s.set_liv_result(result)
+                except Exception as ex:
+                    self.liv_log_message.emit("Warning: could not save LIV result to disk: {}".format(ex))
+                    s.ensure_placeholder_result("liv", ["LIV result serialization failed: {}".format(ex)])
+            ok = bool(result.passed)
+            if not ok:
+                reasons = list(getattr(result, "fail_reasons", None) or [])
+                if not reasons:
+                    reasons = [
+                        "LIV: step reported FAIL but no failure messages were attached — check the LIV log and connection status.",
+                    ]
+                self._emit_step_failed("LIV", reasons)
+            return ok
         except Exception as e:
             self.liv_log_message.emit(f"LIV error: {e}")
             self._emit_step_failed("LIV", ["LIV error: {}".format(e)])
             return False
         finally:
+            self._laser_monitor_armed = False
             # Resume UI polling on main thread (timers cannot be started from this worker thread)
             if mw is not None and hasattr(mw, "resumePollingAfterLiv"):
-                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", Qt.BlockingQueuedConnection)
+                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", QtCompat.BlockingQueuedConnection)
 
     def _run_per(self, recipe: Any) -> bool:
         if PERProcess is None or PERProcessParameters is None:
@@ -364,7 +689,8 @@ class TestSequenceExecutor(QObject):
         recipe_dict = recipe if isinstance(recipe, dict) else {}
         mw = getattr(self, "main_window", None)
         if mw is not None and hasattr(mw, "pausePollingForLiv"):
-            QMetaObject.invokeMethod(mw, "pausePollingForLiv", Qt.BlockingQueuedConnection)
+            QMetaObject.invokeMethod(mw, "pausePollingForLiv", QtCompat.BlockingQueuedConnection)
+            _post_pause_poll_settle()
         try:
             ok_laser, err_laser = apply_arroyo_recipe_and_laser_on_for_per(
                 arroyo, recipe_dict, log=lambda m: self.per_log_message.emit(m)
@@ -385,49 +711,90 @@ class TestSequenceExecutor(QObject):
 
             # Laser ON + recipe current/temp were applied above; PER sweep runs next (Thorlabs + PRM).
             self.per_log_message.emit("PER: Laser is ON — starting PRM sweep and Thorlabs sampling.")
+            self._emit_arroyo_snapshot(arroyo)
 
             params = PERProcessParameters.from_recipe(recipe_dict)
-            self.per_process_window_requested.emit(
-                {
-                    "start_angle_deg": float(getattr(params, "start_angle_deg", 0.0)),
-                    "travel_distance_deg": float(getattr(params, "travel_distance_deg", 0.0)),
-                    "meas_speed_deg_per_sec": float(getattr(params, "meas_speed_deg_per_sec", 0.0)),
-                    "setup_speed_deg_per_sec": float(getattr(params, "setup_speed_deg_per_sec", 0.0)),
-                    "wait_time_ms": float(getattr(params, "wait_time_ms", 0.0)),
-                    "steps_per_degree": float(getattr(params, "steps_per_degree", 0.0)),
-                    "min_per_db": float(getattr(params, "min_per_db", 0.0)),
-                    "actuator_speed": float(getattr(params, "actuator_speed", 0.0)),
-                    "actuator_distance": float(getattr(params, "actuator_distance", 0.0)),
-                    "skip_actuator": bool(getattr(params, "skip_actuator", False)),
-                    "wavelength_nm": float(getattr(params, "wavelength_nm", 0.0) or 0.0),
-                }
-            )
+            params_dict = {
+                "start_angle_deg": float(getattr(params, "start_angle_deg", 0.0)),
+                "travel_distance_deg": float(getattr(params, "travel_distance_deg", 0.0)),
+                "meas_speed_deg_per_sec": float(getattr(params, "meas_speed_deg_per_sec", 0.0)),
+                "setup_speed_deg_per_sec": float(getattr(params, "setup_speed_deg_per_sec", 0.0)),
+                "wait_time_ms": float(getattr(params, "wait_time_ms", 0.0)),
+                "steps_per_degree": float(getattr(params, "steps_per_degree", 0.0)),
+                "min_per_db": float(getattr(params, "min_per_db", 0.0)),
+                "actuator_speed": float(getattr(params, "actuator_speed", 0.0)),
+                "actuator_distance": float(getattr(params, "actuator_distance", 0.0)),
+                "skip_actuator": bool(getattr(params, "skip_actuator", False)),
+                "wavelength_nm": float(getattr(params, "wavelength_nm", 0.0) or 0.0),
+            }
+            # Open PER window on the GUI thread *before* per.run() — same pattern as Spectrum.
+            # Do **not** treat invokeMethod's return value as failure: PyQt often returns False/None for
+            # void @pyqtSlot methods even when the slot ran; a Queued fallback then opened a second window
+            # after per.run() started (race) or closed the first window and broke live signal connections.
+            self._pending_per_window_params = params_dict
+            mw_per = getattr(self, "main_window", None)
+            if mw_per is not None:
+                try:
+                    QMetaObject.invokeMethod(
+                        mw_per,
+                        "blocking_open_per_test_window",
+                        QtCompat.BlockingQueuedConnection,
+                    )
+                except Exception:
+                    # Rare: invoke not delivered — BlockingQueued signal so the worker does not enter
+                    # per.run() until the separate PER window exists (main_window uses Blocking for this).
+                    self.per_process_window_requested.emit(params_dict)
+            else:
+                self.per_process_window_requested.emit(params_dict)
+            self._pending_per_window_params = None
             self.per_log_message.emit(
                 "PER: Arroyo + Thorlabs (VISA) + PRM (Kinesis); RCP laser conditions applied, laser ON."
             )
+            self._laser_monitor_armed = True
             per = PERProcess()
             per.set_instruments(thorlabs_pm=thorlabs, prm=prm, actuator=actuator)
             result = per.run(
                 params,
                 executor=self,
-                stop_requested=lambda: bool(getattr(self, "_stop_requested", False)),
+                stop_requested=self._stop_requested_or_laser_off,
                 recipe=recipe_dict,
             )
+            s = getattr(self, "_result_session", None)
+            if s is not None:
+                try:
+                    s.set_per_result(result)
+                except Exception as ex:
+                    self.per_log_message.emit("Warning: could not save PER result to disk: {}".format(ex))
+                    s.ensure_placeholder_result("per", ["PER result serialization failed: {}".format(ex)])
             passed = bool(result.passed)
+            if not passed:
+                reasons = list(getattr(result, "fail_reasons", None) or [])
+                if not reasons:
+                    reasons = [
+                        "PER: step reported FAIL but no failure messages were attached — check the PER log and connection status.",
+                    ]
+                self._emit_step_failed("PER", reasons)
             return passed
         except Exception as e:
             self.per_log_message.emit(f"PER error: {e}")
             self._emit_step_failed("PER", ["PER error: {}".format(e)])
             return False
         finally:
+            self._laser_monitor_armed = False
             # Default: turn laser off when PER exits (pass/fail/stop) — enclosure safety.
             # Opt out: recipe OPERATIONS.PER.keep_laser_on_after / GENERAL.keep_laser_on_after_per, or BF_PER_KEEP_LASER_ON=1
             try:
-                if per_keep_laser_on_after_step(recipe_dict):
-                    self.per_log_message.emit(
-                        "PER: Arroyo laser left ON (keep_laser_on_after in recipe or BF_PER_KEEP_LASER_ON). "
-                        "Turn laser off manually when finished."
-                    )
+                keep = per_keep_laser_on_after_step(recipe_dict) or self._more_tests_follow_in_sequence()
+                if keep:
+                    if self._more_tests_follow_in_sequence() and not per_keep_laser_on_after_step(recipe_dict):
+                        self.per_log_message.emit(
+                            "PER: Arroyo laser left ON — more tests follow in this sequence."
+                        )
+                    else:
+                        self.per_log_message.emit(
+                            "PER: Arroyo laser left ON (keep_laser_on_after in recipe or BF_PER_KEEP_LASER_ON). "
+                            "Turn laser off manually when finished."
+                        )
                 else:
                     arroyo_laser_off(arroyo)
                     self.per_log_message.emit(
@@ -435,8 +802,9 @@ class TestSequenceExecutor(QObject):
                     )
             except Exception:
                 pass
+            self._emit_arroyo_snapshot(arroyo)
             if mw is not None and hasattr(mw, "resumePollingAfterLiv"):
-                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", Qt.BlockingQueuedConnection)
+                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", QtCompat.BlockingQueuedConnection)
 
     def _run_spectrum(self, recipe: Any) -> bool:
         if SpectrumProcess is None:
@@ -497,8 +865,8 @@ class TestSequenceExecutor(QObject):
                     "ref_level_dbm": sp.ref_level_dbm,
                     "level_scale_db_per_div": sp.level_scale_db_per_div,
                 }
-            except Exception:
-                pass
+            except Exception as ex:
+                self.spectrum_log_message.emit("Spectrum: could not build RCP summary for window (using blanks): {}".format(ex))
         self._spectrum_window_params_pending = params_dict
 
         mw = getattr(self, "main_window", None)
@@ -506,41 +874,64 @@ class TestSequenceExecutor(QObject):
             QMetaObject.invokeMethod(
                 mw,
                 "blocking_open_spectrum_test_window",
-                Qt.BlockingQueuedConnection,
+                QtCompat.BlockingQueuedConnection,
             )
         else:
             self.spectrum_process_window_requested.emit(params_dict)
 
         if mw is not None and hasattr(mw, "pausePollingForLiv"):
-            QMetaObject.invokeMethod(mw, "pausePollingForLiv", Qt.BlockingQueuedConnection)
+            QMetaObject.invokeMethod(mw, "pausePollingForLiv", QtCompat.BlockingQueuedConnection)
+            _post_pause_poll_settle()
+        self._emit_arroyo_snapshot(arroyo)
         try:
             spec = SpectrumProcess()
             spec.set_instruments(arroyo=arroyo, ando=ando, wavemeter=wavemeter)
             result = spec.run(
                 recipe_dict,
                 executor=self,
-                stop_requested=lambda: bool(getattr(self, "_stop_requested", False)),
+                stop_requested=self._stop_requested_or_laser_off,
             )
-            if result.fail_reasons:
-                self._emit_step_failed("SPECTRUM", list(result.fail_reasons))
-            return bool(result.passed)
+            s = getattr(self, "_result_session", None)
+            if s is not None:
+                try:
+                    s.set_spectrum_result(result)
+                except Exception as ex:
+                    self.spectrum_log_message.emit("Warning: could not save Spectrum result to disk: {}".format(ex))
+                    s.ensure_placeholder_result("spectrum", ["Spectrum result serialization failed: {}".format(ex)])
+            ok = bool(result.passed)
+            if not ok:
+                reasons = list(getattr(result, "fail_reasons", None) or [])
+                if not reasons:
+                    reasons = [
+                        "Spectrum: step reported FAIL but no failure messages were attached — check the Spectrum log.",
+                    ]
+                self._emit_step_failed("SPECTRUM", reasons)
+            return ok
         except Exception as e:
             self.spectrum_log_message.emit(f"Spectrum error: {e}")
             self._emit_step_failed("SPECTRUM", ["Spectrum error: {}".format(e)])
             return False
         finally:
+            self._laser_monitor_armed = False
             try:
-                if spectrum_keep_laser_on_after_step(recipe_dict):
-                    self.spectrum_log_message.emit(
-                        "Spectrum: Arroyo laser left ON (keep_laser_on_after in recipe or BF_SPECTRUM_KEEP_LASER_ON)."
-                    )
+                keep = spectrum_keep_laser_on_after_step(recipe_dict) or self._more_tests_follow_in_sequence()
+                if keep:
+                    if self._more_tests_follow_in_sequence() and not spectrum_keep_laser_on_after_step(recipe_dict):
+                        self.spectrum_log_message.emit(
+                            "Spectrum: Arroyo laser left ON — more tests follow in this sequence."
+                        )
+                    else:
+                        self.spectrum_log_message.emit(
+                            "Spectrum: Arroyo laser left ON (keep_laser_on_after in recipe or BF_SPECTRUM_KEEP_LASER_ON)."
+                        )
                 else:
                     arroyo_laser_off(arroyo)
                     self.spectrum_log_message.emit("Spectrum: Arroyo laser output OFF (step ended).")
             except Exception:
                 pass
+            self._emit_arroyo_snapshot(arroyo)
             if mw is not None and hasattr(mw, "resumePollingAfterLiv"):
-                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", Qt.BlockingQueuedConnection)
+                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", QtCompat.BlockingQueuedConnection)
 
     def _run_temperature_stability(self, recipe: Any, slot: int, step_name: str) -> bool:
         if TemperatureStabilityProcess is None or TemperatureStabilityParameters is None:
@@ -553,6 +944,7 @@ class TestSequenceExecutor(QObject):
             return False
         arroyo = bridge.get_arroyo()
         ando = bridge.get_instrument("Ando")
+        thorlabs = bridge.get_instrument("Thorlabs")
         recipe_dict = recipe if isinstance(recipe, dict) else {}
         if arroyo is None or not getattr(arroyo, "is_connected", lambda: False)():
             self.stability_log_message.emit("Temperature stability requires Arroyo connected.")
@@ -568,6 +960,13 @@ class TestSequenceExecutor(QObject):
                 ["Ando is not connected — connect the optical spectrum analyzer in the Connection tab."],
             )
             return False
+        if thorlabs is None or not getattr(thorlabs, "is_connected", lambda: False)():
+            self.stability_log_message.emit("Temperature stability requires Thorlabs powermeter connected.")
+            self._emit_step_failed(
+                step_name,
+                ["Thorlabs powermeter is not connected — connect it in the Connection tab (required for Temperature Stability)."],
+            )
+            return False
 
         params_obj = TemperatureStabilityParameters.from_recipe_blocks(recipe_dict, slot)
         try:
@@ -576,51 +975,101 @@ class TestSequenceExecutor(QObject):
             pr_dict = dataclasses.asdict(params_obj)
         except Exception:
             pr_dict = {}
-        self._stability_window_params_pending = {"slot": slot, "params": pr_dict, "step_name": step_name}
-
+        pending = {"slot": slot, "params": pr_dict, "step_name": step_name}
+        self._stability_window_params_pending = pending
         mw = getattr(self, "main_window", None)
+        rcp_path_for_ts = ""
         if mw is not None:
-            QMetaObject.invokeMethod(
-                mw,
-                "blocking_open_stability_test_window",
-                Qt.BlockingQueuedConnection,
-            )
+            try:
+                rcp_path_for_ts = str(
+                    getattr(mw, "_current_recipe_path", None) or getattr(mw, "_recipe_tab_path", None) or ""
+                )
+            except Exception:
+                rcp_path_for_ts = ""
+        if mw is not None:
+            try:
+                setattr(mw, "_stability_window_open_params", pending)
+            except Exception:
+                pass
+            # Same as Spectrum: BlockingQueuedConnection to MainWindow — signal was never connected, so emit did nothing.
+            try:
+                QMetaObject.invokeMethod(
+                    mw,
+                    "blocking_open_stability_test_window",
+                    QtCompat.BlockingQueuedConnection,
+                )
+            except Exception:
+                self.stability_log_message.emit("Temperature Stability: could not open secondary window (invoke failed).")
         else:
             self.stability_log_message.emit("No main window — cannot open stability secondary window.")
 
-        if mw is not None and hasattr(mw, "pausePollingForLiv"):
-            QMetaObject.invokeMethod(mw, "pausePollingForLiv", Qt.BlockingQueuedConnection)
+        if mw is not None and hasattr(mw, "pausePollingForStability"):
+            QMetaObject.invokeMethod(mw, "pausePollingForStability", QtCompat.BlockingQueuedConnection)
+            _post_pause_poll_settle()
         self._stability_live_slot = int(slot)
         try:
             proc = TemperatureStabilityProcess()
-            proc.set_instruments(arroyo=arroyo, ando=ando)
+            proc.set_instruments(arroyo=arroyo, ando=ando, thorlabs=thorlabs)
             result = proc.run(
                 recipe_dict,
                 self,
                 slot,
-                stop_requested=lambda: bool(getattr(self, "_stop_requested", False)),
+                stop_requested=self._stop_requested_or_laser_off,
                 step_label=step_name,
+                recipe_file_path=rcp_path_for_ts,
             )
-            if result.fail_reasons:
-                self._emit_step_failed(step_name, list(result.fail_reasons))
-            return bool(result.passed)
+            s = getattr(self, "_result_session", None)
+            if s is not None:
+                try:
+                    s.set_stability_result(slot, result)
+                except Exception as ex:
+                    self.stability_log_message.emit("Warning: could not save Temperature Stability result: {}".format(ex))
+                    s.ensure_placeholder_result(
+                        "ts{}".format(int(slot)),
+                        ["Temperature Stability result serialization failed: {}".format(ex)],
+                    )
+            ok = bool(result.passed)
+            if not ok:
+                reasons = list(getattr(result, "fail_reasons", None) or [])
+                if not reasons:
+                    reasons = [
+                        "{}: step reported FAIL but no failure messages were attached — check the Temperature Stability log.".format(
+                            step_name
+                        ),
+                    ]
+                self._emit_step_failed(step_name, reasons)
+            return ok
         except Exception as e:
             self.stability_log_message.emit("Temperature stability error: {}".format(e))
             self._emit_step_failed(step_name, ["Temperature stability error: {}".format(e)])
             return False
         finally:
+            self._laser_monitor_armed = False
             try:
-                if spectrum_keep_laser_on_after_step(recipe_dict):
-                    self.stability_log_message.emit(
-                        "Stability: Arroyo laser left ON (keep_laser_on_after / BF_SPECTRUM_KEEP_LASER_ON)."
-                    )
+                ss = getattr(ando, "stop_sweep", None)
+                if callable(ss):
+                    ss()
+            except Exception:
+                pass
+            try:
+                keep = spectrum_keep_laser_on_after_step(recipe_dict) or self._more_tests_follow_in_sequence()
+                if keep:
+                    if self._more_tests_follow_in_sequence() and not spectrum_keep_laser_on_after_step(recipe_dict):
+                        self.stability_log_message.emit(
+                            "Stability: Arroyo laser left ON — more tests follow in this sequence."
+                        )
+                    else:
+                        self.stability_log_message.emit(
+                            "Stability: Arroyo laser left ON (keep_laser_on_after / BF_SPECTRUM_KEEP_LASER_ON)."
+                        )
                 else:
                     arroyo_laser_off(arroyo)
                     self.stability_log_message.emit("Stability: Arroyo laser output OFF (step ended).")
             except Exception:
                 pass
+            self._emit_arroyo_snapshot(arroyo)
             if mw is not None and hasattr(mw, "resumePollingAfterLiv"):
-                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", Qt.BlockingQueuedConnection)
+                QMetaObject.invokeMethod(mw, "resumePollingAfterLiv", QtCompat.BlockingQueuedConnection)
             self._stability_live_slot = None
 
 
@@ -642,7 +1091,9 @@ class TestSequenceThread(QThread):
                 self.sequence_completed.emit(self.result if self.result is not None else False)
         except Exception:
             self.result = False
-            if getattr(self.executor, "_stop_requested", False):
+            if getattr(self.executor, "_stop_requested", False) and bool(
+                getattr(self.executor, "_stop_from_user", False)
+            ):
                 setattr(self.executor, "_sequence_stopped_by_user", True)
                 try:
                     self.executor.log_message.emit("STOP: Test sequence ended (stop requested).")

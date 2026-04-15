@@ -27,17 +27,21 @@ except ImportError:
     pg = None
 
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar
+from view.temperature_stability_plot import compact_simple_xy_plot_axes
+from view.plot_series_checkboxes import freeze_plot_navigation
 
 try:
     from operations.spectrum.trace_plotting import (
         pair_trace_floats,
         spectrum_plot_x_range_nm,
         spectrum_plot_y_range_dbm,
+        spectrum_wavemeter_bottom_axis_label,
     )
 except ImportError:
     pair_trace_floats = None  # type: ignore[misc, assignment]
     spectrum_plot_x_range_nm = None  # type: ignore[misc, assignment]
     spectrum_plot_y_range_dbm = None  # type: ignore[misc, assignment]
+    spectrum_wavemeter_bottom_axis_label = None  # type: ignore[misc, assignment]
 
 
 def _fmt(v, default="—"):
@@ -167,6 +171,9 @@ class SpectrumTestSequenceWindow(QMainWindow):
         if not _PG_AVAILABLE:
             right_layout.addWidget(QLabel("pyqtgraph required for graph display."))
             self._plot_widget = None
+            self._spectrum_plot_item = None
+            self._spectrum_bottom_axis_color = "#333333"
+            self._spectrum_bottom_default_label = "Wavelength WDATA (nm)"
             self._curve = None
         else:
             pw = pg.PlotWidget()
@@ -183,7 +190,12 @@ class SpectrumTestSequenceWindow(QMainWindow):
             p.getAxis("bottom").setPen(axis_pen)
             p.getAxis("bottom").setTextPen(axis_pen)
             self._plot_widget = pw
+            self._spectrum_plot_item = p
+            self._spectrum_bottom_axis_color = _ax
+            self._spectrum_bottom_default_label = "Wavelength WDATA (nm)"
             self._curve = pw.plot([], [], pen=pg.mkPen("#000000", width=1.5), antialias=True)
+            freeze_plot_navigation(p)
+            compact_simple_xy_plot_axes(p, pw)
             right_layout.addWidget(pw, 1)
 
         self._rcp_center_nm = None
@@ -192,7 +204,7 @@ class SpectrumTestSequenceWindow(QMainWindow):
         self._rcp_ls = None
 
         self._footnote = QLabel(
-            "Live trace: Arroyo/Ando/wavemeter per recipe → sweep 1 plot → 4 s → re-center to ANA? peak → sweep 2 plot → 4 s → main tab; window closes at end."
+            "Live trace: sweep 1 plots as soon as WDATA/LDATA is read; sweep 2 replaces the trace when ready (no intentional blank gap)."
         )
         self._footnote.setStyleSheet("color: #9e9e9e; font-size: 10px;")
         right_layout.addWidget(self._footnote)
@@ -247,15 +259,38 @@ class SpectrumTestSequenceWindow(QMainWindow):
             if yr is not None:
                 vb.setYRange(yr[0], yr[1], padding=0.02)
 
+    def _apply_wavemeter_bottom_axis_label(self, nm) -> None:
+        """Bottom axis title = wavemeter nm (full decimals); ticks stay WDATA."""
+        pi = getattr(self, "_spectrum_plot_item", None)
+        if pi is None:
+            return
+        tc = getattr(self, "_spectrum_bottom_axis_color", "#333333")
+        default = getattr(self, "_spectrum_bottom_default_label", "Wavelength WDATA (nm)")
+        if spectrum_wavemeter_bottom_axis_label is not None:
+            txt = spectrum_wavemeter_bottom_axis_label(nm, default=default)
+        else:
+            txt = default if nm is None else "{} nm".format(float(nm))
+        try:
+            pi.setLabel("bottom", txt, color=tc)
+        except Exception:
+            pass
+
     def set_wavemeter_reading(self, nm) -> None:
-        """Live wavelength from wavemeter (nm); None shows —."""
+        """Live wavelength from wavemeter (nm); None shows —. Plot bottom axis shows same reading as its label."""
         if nm is None:
             self._wm_value.setText("—")
+            self._apply_wavemeter_bottom_axis_label(None)
             return
         try:
-            self._wm_value.setText("{:.6f}".format(float(nm)))
+            v = float(nm)
+            if spectrum_wavemeter_bottom_axis_label is not None:
+                self._wm_value.setText(spectrum_wavemeter_bottom_axis_label(v, default="—"))
+            else:
+                s = ("{:.12f}".format(v)).rstrip("0").rstrip(".")
+                self._wm_value.setText(s + " nm")
         except Exception:
             self._wm_value.setText(str(nm))
+        self._apply_wavemeter_bottom_axis_label(nm)
 
     def set_live_trace(self, wdata, ldata) -> None:
         """Plot Ando WDATA vs LDATA (instrument readback; coerced to float for pyqtgraph)."""
@@ -299,6 +334,7 @@ class SpectrumTestSequenceWindow(QMainWindow):
     def clear_live_plot(self) -> None:
         if self._curve is not None:
             self._curve.setData([], [])
+        self._apply_wavemeter_bottom_axis_label(None)
 
     def set_status(self, text: str):
         self._status.setText(text or "")

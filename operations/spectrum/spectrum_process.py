@@ -1,13 +1,14 @@
 """
 Spectrum test step: TEC + laser on, apply RCP to Ando + wavemeter, two single sweeps.
 
-After sweep 1: plot Spectrum window + main **First sweep** tab, then wait 4 s. After sweep 2: plot Spectrum window, wait 4 s, then final main-tab update. First sweep updates the **First sweep**
-sub-tab only; second sweep updates the **Second sweep** (primary) sub-tab. ANAR? / ANA? layouts follow
-recipe analysis (DFB-LD, LED, FP-LD); second-sweep center wavelength uses ANAR? PK_WL_nm, else ANA?
-``PK_WL_nm`` / comma fields, else PKWL? / trace peak.
+After each sweep: UI and plots update immediately (no fixed delay between sweeps or before the final
+main-tab result). First sweep updates the **First sweep** sub-tab only; second sweep updates the
+**Second sweep** (primary) sub-tab. ANAR? / ANA? layouts follow recipe analysis (DFB-LD, LED, FP-LD);
+second-sweep center wavelength uses ANAR? PK_WL_nm, else ANA? ``PK_WL_nm`` / comma fields, else PKWL? / trace peak.
 
 WDATA/LDATA validation matches terminal scripts; ANA? fields include ``EXTRA_nm`` (4th value) when present.
-Optional pass/fail limits apply only when enabled in the recipe.
+Pass/fail limits run when the recipe enables them (flags) or defines SPECTRUM limits / thresholds
+(PASS_FAIL_CRITERIA.SPECTRUM and OPERATIONS.SPECTRUM.limits: SMSR/FWHM scalars merged; Peak WL / Cen WL use absolute LL/UL vs measured peak / center wavelength).
 """
 from __future__ import annotations
 
@@ -54,6 +55,175 @@ def _truthy(v: Any) -> bool:
         return v
     s = str(v).strip().lower()
     return s in ("1", "true", "yes", "on")
+
+
+def _parse_limit_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _spec_limits_any_row_enabled(spec: Dict[str, Any]) -> bool:
+    lim = spec.get("limits") if isinstance(spec.get("limits"), dict) else None
+    if not lim:
+        return False
+    for sub in lim.values():
+        if not isinstance(sub, dict):
+            continue
+        if _truthy(sub.get("enable", sub.get("Enable", False))):
+            return True
+    return False
+
+
+def _merge_spectrum_limits_from_operations_spec(
+    spec: Dict[str, Any],
+    min_smsr_db: float,
+    max_fwhm_nm: float,
+    wavelength_tolerance_nm: float,
+) -> Tuple[float, float, float, float]:
+    """
+    Merge SMSR / FWHM rows from OPERATIONS.SPECTRUM.limits into scalar thresholds.
+    Peak WL / Cen WL are **not** merged here — they use absolute LL/UL bands via SpectrumProcessParameters.
+    """
+    lim = spec.get("limits") if isinstance(spec.get("limits"), dict) else None
+    if not lim:
+        return float(min_smsr_db), float(max_fwhm_nm), float(wavelength_tolerance_nm), 0.0
+
+    ms, mf, wt = float(min_smsr_db), float(max_fwhm_nm), float(wavelength_tolerance_nm)
+    min_fwhm = 0.0
+
+    for key in ("SMSR", "smsr"):
+        sub = lim.get(key)
+        if not isinstance(sub, dict) or not _truthy(sub.get("enable", sub.get("Enable", False))):
+            continue
+        ll = _parse_limit_float(sub.get("ll", sub.get("LL")))
+        if ll is not None:
+            ms = max(ms, ll)
+
+    for key in ("FWHM", "fwhm"):
+        sub = lim.get(key)
+        if not isinstance(sub, dict) or not _truthy(sub.get("enable", sub.get("Enable", False))):
+            continue
+        ul = _parse_limit_float(sub.get("ul", sub.get("UL")))
+        if ul is not None:
+            mf = min(mf, ul)
+        ll_f = _parse_limit_float(sub.get("ll", sub.get("LL")))
+        if ll_f is not None:
+            min_fwhm = max(min_fwhm, ll_f)
+
+    return ms, mf, wt, min_fwhm
+
+
+def _parse_peak_cen_wl_bands_from_spec(spec: Dict[str, Any]) -> Tuple[bool, Optional[float], Optional[float], bool, Optional[float], Optional[float]]:
+    """Peak WL / Cen WL rows: enabled + LL/UL as absolute wavelength bands (nm)."""
+    lim = spec.get("limits") if isinstance(spec.get("limits"), dict) else None
+    if not lim:
+        return False, None, None, False, None, None
+
+    def one(param_names: Tuple[str, ...]) -> Tuple[bool, Optional[float], Optional[float]]:
+        sub = None
+        for p in param_names:
+            sub = lim.get(p) or lim.get(p.replace(" ", ""))
+            if isinstance(sub, dict):
+                break
+        if not isinstance(sub, dict) or not _truthy(sub.get("enable", sub.get("Enable", False))):
+            return False, None, None
+        return True, _parse_limit_float(sub.get("ll", sub.get("LL"))), _parse_limit_float(sub.get("ul", sub.get("UL")))
+
+    pk_e, pk_ll, pk_ul = one(("Peak WL", "PeakWL"))
+    cn_e, cn_ll, cn_ul = one(("Cen WL", "CenWL"))
+    return pk_e, pk_ll, pk_ul, cn_e, cn_ll, cn_ul
+
+
+def _center_wl_nm_from_metrics(m: Dict[str, Any]) -> Optional[float]:
+    """Center wavelength for Cen WL limits: LED MEAN WL, else PK + MODE offset, else peak."""
+    anar = m.get("anar") if isinstance(m.get("anar"), dict) else {}
+    ana = m.get("ana") if isinstance(m.get("ana"), dict) else {}
+    if anar.get("MEAN_WL_nm") is not None:
+        try:
+            return float(anar["MEAN_WL_nm"])
+        except (TypeError, ValueError):
+            pass
+    pk = m.get("pk_wl")
+    for d in (anar, ana):
+        if not isinstance(d, dict):
+            continue
+        pw = d.get("PK_WL_nm")
+        if pw is None:
+            pw = pk
+        mo = d.get("MODE_OFFSET_nm")
+        if pw is not None and mo is not None:
+            try:
+                return float(pw) + float(mo)
+            except (TypeError, ValueError):
+                pass
+    if pk is not None:
+        try:
+            return float(pk)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _wl_band_failures(
+    label: str,
+    param_name: str,
+    value_nm: Optional[float],
+    ll_nm: Optional[float],
+    ul_nm: Optional[float],
+) -> List[str]:
+    """Absolute band: value within [LL, UL] for whichever bounds are set."""
+    if value_nm is None:
+        return ["{}: {} not available (LL/UL check).".format(label, param_name)]
+    v = float(value_nm)
+    out: List[str] = []
+    if ll_nm is not None and v < float(ll_nm):
+        out.append("{}: {} {:.6f} nm below LL {:.6f} nm.".format(label, param_name, v, float(ll_nm)))
+    if ul_nm is not None and v > float(ul_nm):
+        out.append("{}: {} {:.6f} nm above UL {:.6f} nm.".format(label, param_name, v, float(ul_nm)))
+    return out
+
+
+def _should_enable_spectrum_limit_checks(
+    pfc_s: Any,
+    spec: Dict[str, Any],
+    min_smsr_db: float,
+    max_fwhm_nm: float,
+    wavelength_tolerance_nm: float,
+    peak_wl_check: bool = False,
+    cen_wl_check: bool = False,
+    min_fwhm_nm: float = 0.0,
+) -> bool:
+    if peak_wl_check or cen_wl_check:
+        return True
+    if min_fwhm_nm > 0.0:
+        return True
+    if isinstance(pfc_s, dict):
+        if (
+            _truthy(pfc_s.get("enable_limits"))
+            or _truthy(pfc_s.get("limits_enabled"))
+            or _truthy(pfc_s.get("check_limits"))
+        ):
+            return True
+    if isinstance(spec, dict):
+        if (
+            _truthy(spec.get("enable_limits"))
+            or _truthy(spec.get("limits_enabled"))
+            or _truthy(spec.get("check_limits"))
+        ):
+            return True
+        if _spec_limits_any_row_enabled(spec):
+            return True
+    if min_smsr_db > 0.0:
+        return True
+    if max_fwhm_nm < 899.5:
+        return True
+    if wavelength_tolerance_nm < 899.5:
+        return True
+    return False
 
 
 def _wavemeter_range_to_api(range_str: str) -> str:
@@ -231,52 +401,102 @@ class SpectrumProcessParameters:
     max_fwhm_nm: float = 999.0
     wavelength_tolerance_nm: float = 999.0
     limits_enabled: bool = False
+    peak_wl_check: bool = False
+    peak_wl_ll: Optional[float] = None
+    peak_wl_ul: Optional[float] = None
+    cen_wl_check: bool = False
+    cen_wl_ll: Optional[float] = None
+    cen_wl_ul: Optional[float] = None
+    min_fwhm_nm: float = 0.0
+    # Recipe ``wl_shift`` (nm) applied at start on Ando ``WLSFT``; see ``auto_wl_shift_wavemeter_minus_peak``.
+    wl_shift_nm: float = 0.0
+    # After sweep 1: set Ando ``WLSFT`` to (wavemeter − Ando peak used for CTR) when both are valid.
+    auto_wl_shift_wavemeter_minus_peak: bool = True
+    # While waiting for sweep 1 to finish, poll wavemeter and update the Spectrum window (throttled).
+    wavemeter_poll_during_first_sweep: bool = True
 
     @classmethod
     def from_recipe(cls, recipe: Dict[str, Any]) -> "SpectrumProcessParameters":
         op = recipe.get("OPERATIONS") or recipe.get("operations") or {}
         spec = op.get("SPECTRUM") or op.get("spectrum") or {}
+        if not isinstance(spec, dict):
+            spec = {}
         pfc = recipe.get("PASS_FAIL_CRITERIA") or recipe.get("pass_fail_criteria") or {}
         pfc_s = pfc.get("SPECTRUM") or pfc.get("spectrum") or {}
+        if not isinstance(pfc_s, dict):
+            pfc_s = {}
         general = recipe.get("GENERAL") or recipe.get("general") or {}
 
-        limits_enabled = False
-        if isinstance(pfc_s, dict):
-            limits_enabled = (
-                _truthy(pfc_s.get("enable_limits"))
-                or _truthy(pfc_s.get("limits_enabled"))
-                or _truthy(pfc_s.get("check_limits"))
-            )
-        if isinstance(spec, dict) and not limits_enabled:
-            limits_enabled = (
-                _truthy(spec.get("enable_limits"))
-                or _truthy(spec.get("limits_enabled"))
-                or _truthy(spec.get("check_limits"))
-            )
+        min_smsr_db = _get_float(
+            pfc_s, ["min_SMSR_dB", "SMSR_Min_dB", "min_smsr_dB"], _get_float(spec, ["SMSR_Min_dB"], 0.0)
+        )
+        max_fwhm_nm = _get_float(
+            pfc_s, ["max_FWHM_nm", "FWHM_Max_nm", "max_fwhm_nm"], _get_float(spec, ["FWHM_Max_nm"], 999.0)
+        )
+        wavelength_tolerance_nm = _get_float(
+            pfc_s, ["wavelength_tolerance_nm", "WavelengthTolerance_nm"], 999.0
+        )
+        min_smsr_db, max_fwhm_nm, wavelength_tolerance_nm, min_fwhm_nm = _merge_spectrum_limits_from_operations_spec(
+            spec, min_smsr_db, max_fwhm_nm, wavelength_tolerance_nm
+        )
+        peak_wl_check, peak_wl_ll, peak_wl_ul, cen_wl_check, cen_wl_ll, cen_wl_ul = _parse_peak_cen_wl_bands_from_spec(
+            spec
+        )
+        limits_enabled = _should_enable_spectrum_limit_checks(
+            pfc_s,
+            spec,
+            min_smsr_db,
+            max_fwhm_nm,
+            wavelength_tolerance_nm,
+            peak_wl_check=peak_wl_check,
+            cen_wl_check=cen_wl_check,
+            min_fwhm_nm=min_fwhm_nm,
+        )
 
-        center = _get_float(spec, ["CenterWL", "center_nm", "center", "wavelength"], 1550.0)
+        # Prefer snake_case / INI keys so merged vendor+file dicts use the file values, not template CamelCase.
+        center = _get_float(spec, ["center_nm", "CenterWL", "center", "wavelength"], 1550.0)
         if center <= 0:
             center = _to_float(general.get("Wavelength"), 1550.0) or _to_float(recipe.get("Wavelength"), 1550.0)
 
+        wl_shift_nm = _get_float(spec, ["wl_shift", "WlShift", "WL_Shift", "wlShift"], 0.0)
+        auto_wm = spec.get("auto_wl_shift_wavemeter", spec.get("auto_wl_shift"))
+        if auto_wm is None:
+            auto_wl_shift_wavemeter_minus_peak = True
+        else:
+            auto_wl_shift_wavemeter_minus_peak = _truthy(auto_wm)
+        poll_wm = spec.get("wavemeter_during_first_sweep", spec.get("wavemeter_poll_first_sweep"))
+        if poll_wm is None:
+            wavemeter_poll_during_first_sweep = True
+        else:
+            wavemeter_poll_during_first_sweep = _truthy(poll_wm)
+
         return cls(
             center_nm=float(center),
-            span_nm=_get_float(spec, ["Span", "span_nm"], 10.0),
-            resolution_nm=_get_float(spec, ["Resolution", "resolution_nm"], 0.1),
-            sampling_points=int(max(11, min(20001, _get_float(spec, ["Sampling", "sampling"], 501)))),
-            ref_level_dbm=_get_float(spec, ["RefLevel", "ref_level_dBm"], -10.0),
-            level_scale_db_per_div=_get_float(spec, ["level_scale", "LevelScale"], 10.0),
-            temperature_c=_get_float(spec, ["Temperature", "temperature"], 25.0),
-            laser_current_mA=_get_float(spec, ["Current", "current"], 0.0),
-            sensitivity=_get_str(spec, ["Sensitivity", "sensitivity"], "MID"),
-            analysis=_get_str(spec, ["Analysis", "analysis"], "DFB-LD"),
-            min_smsr_db=_get_float(
-                pfc_s, ["min_SMSR_dB", "SMSR_Min_dB", "min_smsr_dB"], _get_float(spec, ["SMSR_Min_dB"], 0.0)
+            span_nm=_get_float(spec, ["span_nm", "Span"], 10.0),
+            resolution_nm=_get_float(spec, ["resolution_nm", "Resolution"], 0.1),
+            sampling_points=int(
+                max(11, min(20001, _get_float(spec, ["sampling", "Sampling", "sampling_points"], 501)))
             ),
-            max_fwhm_nm=_get_float(
-                pfc_s, ["max_FWHM_nm", "FWHM_Max_nm", "max_fwhm_nm"], _get_float(spec, ["FWHM_Max_nm"], 999.0)
-            ),
-            wavelength_tolerance_nm=_get_float(pfc_s, ["wavelength_tolerance_nm", "WavelengthTolerance_nm"], 999.0),
+            ref_level_dbm=_get_float(spec, ["ref_level_dbm", "ref_level_dBm", "RefLevel"], -10.0),
+            level_scale_db_per_div=_get_float(spec, ["level_scale_db_per_div", "level_scale", "LevelScale"], 10.0),
+            temperature_c=_get_float(spec, ["temperature", "Temperature"], 25.0),
+            laser_current_mA=_get_float(spec, ["current", "Current", "laser_current_mA"], 0.0),
+            sensitivity=_get_str(spec, ["sensitivity", "Sensitivity"], "MID"),
+            analysis=_get_str(spec, ["analysis", "Analysis"], "DFB-LD"),
+            min_smsr_db=min_smsr_db,
+            max_fwhm_nm=max_fwhm_nm,
+            wavelength_tolerance_nm=wavelength_tolerance_nm,
             limits_enabled=limits_enabled,
+            peak_wl_check=peak_wl_check,
+            peak_wl_ll=peak_wl_ll,
+            peak_wl_ul=peak_wl_ul,
+            cen_wl_check=cen_wl_check,
+            cen_wl_ll=cen_wl_ll,
+            cen_wl_ul=cen_wl_ul,
+            min_fwhm_nm=min_fwhm_nm,
+            wl_shift_nm=float(wl_shift_nm),
+            auto_wl_shift_wavemeter_minus_peak=auto_wl_shift_wavemeter_minus_peak,
+            wavemeter_poll_during_first_sweep=wavemeter_poll_during_first_sweep,
         )
 
 
@@ -311,15 +531,13 @@ class SpectrumProcessResult:
     # If False, only refresh plots (first sweep done; keep floating window open until final emit).
     # Must stay False until the last result — do not flip back to True on the same object before the GUI slot runs.
     spectrum_finalize_secondary_window: bool = True
+    # Ando WLSFT applied before sweep 2 when ``auto_wl_shift_wavemeter_minus_peak`` is enabled (nm).
+    wl_shift_applied_nm: Optional[float] = None
 
 
 class SpectrumProcess:
-    # After first sweep: main First tab + floating plot updated, then wait before re-center + second SGL.
-    PAUSE_S_BEFORE_SECOND_SWEEP_S = 4.0
-    # After second sweep: floating plot updated, then wait before final main-tab update / PASS row.
-    PAUSE_AFTER_SECOND_SWEEP_S = 4.0
-    # Extra delay after SWEEP? idle before peak/trace queries (reduces GPIB timeouts).
-    POST_SWEEP_SETTLE_S = 0.35
+    PAUSE_S_BEFORE_SECOND_SWEEP_S = 0.0
+    PAUSE_AFTER_SECOND_SWEEP_S = 0.0
 
     def __init__(self) -> None:
         self._arroyo: Any = None
@@ -377,6 +595,35 @@ class SpectrumProcess:
             return float(v)
         except Exception:
             return None
+
+    def _wait_sweep_done_with_wavemeter_poll(
+        self, executor: Any, stop_requested: Callable[[], bool], poll_wavemeter: bool
+    ) -> bool:
+        """
+        Wait until Ando single sweep finishes. If ``poll_wavemeter``, read the wavemeter on a
+        throttled interval and emit to the GUI (first sweep live display).
+        """
+        a = self._ando
+        if a is None:
+            return False
+        t0 = time.time()
+        last_wm_emit = 0.0
+        wm_interval_s = 0.12
+        while (time.time() - t0) < 180.0:
+            if stop_requested():
+                ss = getattr(a, "stop_sweep", None)
+                if callable(ss):
+                    ss()
+                return False
+            if getattr(a, "is_sweep_done", lambda: True)():
+                return True
+            if poll_wavemeter:
+                now = time.time()
+                if now - last_wm_emit >= wm_interval_s:
+                    self._emit_wavemeter(executor, self._read_wavemeter_nm())
+                    last_wm_emit = now
+            time.sleep(0.04)
+        return bool(getattr(a, "is_sweep_done", lambda: True)())
 
     def _apply_wavemeter_recipe(self, recipe: Dict[str, Any], executor: Any) -> None:
         if self._wavemeter is None or not getattr(self._wavemeter, "is_connected", lambda: False)():
@@ -479,6 +726,28 @@ class SpectrumProcess:
             a.set_log_scale(ls)
         a.set_sampling_points(params.sampling_points)
         _analysis_command(a, params.analysis)
+        if abs(float(params.wl_shift_nm)) > 1e-9:
+            fn = getattr(a, "set_wavelength_shift_nm", None)
+            if callable(fn):
+                try:
+                    fn(float(params.wl_shift_nm))
+                    self._log(
+                        executor,
+                        "Spectrum: Ando WLSFT {:.6f} nm (recipe wl_shift).".format(float(params.wl_shift_nm)),
+                    )
+                except Exception as ex:
+                    self._log(executor, "Spectrum: recipe wl_shift not applied: {}".format(ex))
+            else:
+                try:
+                    a.write_command("WLSFT {:.6f}".format(float(params.wl_shift_nm)))
+                    self._log(
+                        executor,
+                        "Spectrum: Ando WLSFT {:.6f} nm (recipe wl_shift, generic write).".format(
+                            float(params.wl_shift_nm)
+                        ),
+                    )
+                except Exception as ex:
+                    self._log(executor, "Spectrum: recipe wl_shift write failed: {}".format(ex))
         self._log(
             executor,
             "Spectrum: Ando CTR {:.3f} nm, span {:.3f} nm, SMPL {}.".format(
@@ -493,50 +762,66 @@ class SpectrumProcess:
         stop_requested: Callable[[], bool],
         analysis_name: str = "",
         fetch_anar: bool = False,
+        poll_wavemeter_during_wait: bool = False,
     ) -> Tuple[List[float], List[float], Dict[str, Any]]:
-        """Single sweep, peak search, PKWL/PKLV/SPWD/SMSR/ANA?, optional ANAR? (first sweep), then WDATA/LDATA."""
+        """
+        Fast sweep + read (reference pattern):
+          1. SGL + wait
+          2. WRTA (select trace A)
+          3. Execute analysis (DFBAN / LEDAN / FPAN) — must run AFTER sweep
+          4. ANA? → (fwhm, peak_wl, pk_lv, smsr)
+          5. Fallback: SPWD?, SMSR?, PKWL?, PKLV?
+          6. WDATA/LDATA for trace plot
+        """
         a = self._ando
         empty: Dict[str, Any] = {
-            "pk_wl": None,
-            "pk_lv": None,
-            "fwhm": None,
-            "smsr": None,
-            "ana": None,
-            "anar": None,
+            "pk_wl": None, "pk_lv": None, "fwhm": None, "smsr": None,
+            "ana": None, "anar": None,
         }
-        if a is None:
+        if a is None or stop_requested():
             return [], [], empty
+
+        a.single_sweep()
+        if poll_wavemeter_during_wait:
+            if not self._wait_sweep_done_with_wavemeter_poll(executor, stop_requested, True):
+                return [], [], empty
+        else:
+            wait = getattr(a, "wait_sweep_done", None)
+            if callable(wait):
+                try:
+                    wait(timeout_s=180.0, stop_requested=stop_requested)
+                except TypeError:
+                    wait(timeout_s=180.0)
+            else:
+                t0 = time.time()
+                while (time.time() - t0) < 180.0:
+                    if stop_requested():
+                        ss = getattr(a, "stop_sweep", None)
+                        if callable(ss):
+                            ss()
+                        return [], [], empty
+                    if getattr(a, "is_sweep_done", lambda: True)():
+                        break
+                    time.sleep(0.04)
         if stop_requested():
             return [], [], empty
-        a.single_sweep()
-        wait = getattr(a, "wait_sweep_done", None)
-        if callable(wait):
-            wait(timeout_s=180.0)
-        else:
-            t0 = time.time()
-            while (time.time() - t0) < 180.0:
-                if getattr(a, "is_sweep_done", lambda: True)():
-                    break
-                time.sleep(0.2)
-        time.sleep(0.12)
-        time.sleep(float(self.POST_SWEEP_SETTLE_S))
+
         tw = getattr(a, "trace_write_a", None)
         if callable(tw):
             tw()
-        time.sleep(0.1)
-        ps = getattr(a, "peak_search", None)
-        if callable(ps):
-            ps()
-            time.sleep(0.12)
-        # ANA?/ANAR? right after PKSR (same order as manual terminal). Querying PKWL?/SPWD? first can
-        # confuse some USB–GPIB stacks or leave ANA? empty on certain firmware.
-        qana = getattr(a, "query_analysis_ana", None)
+
+        # Execute analysis AFTER sweep completes (DFBAN/LEDAN/FPAN)
+        _analysis_command(a, analysis_name)
+
+        # ANA? returns FWHM + peak WL + peak level (+ often SMSR) in one query
         ana = None
+        qana = getattr(a, "query_analysis_ana", None)
         if callable(qana):
             try:
                 ana = qana(analysis_name)
             except TypeError:
                 ana = qana()
+
         anar = None
         if fetch_anar:
             qanar = getattr(a, "query_analysis_anar", None)
@@ -545,12 +830,60 @@ class SpectrumProcess:
                     anar = qanar(analysis_name)
                 except Exception:
                     anar = None
-        pk_wl = getattr(a, "query_peak_wavelength_nm", lambda: None)()
-        pk_lv = getattr(a, "query_peak_level_dbm", lambda: None)()
-        fwhm = getattr(a, "query_spectral_width_nm", lambda: None)()
-        smsr = getattr(a, "query_smsr_db", lambda: None)()
-        pk_wl, pk_lv, fwhm, smsr = _merge_metrics_from_ana(ana, pk_wl, pk_lv, fwhm, smsr)
-        pk_wl, pk_lv, fwhm, smsr = _merge_metrics_from_anar(anar, pk_wl, pk_lv, fwhm, smsr)
+
+        pk_wl: Optional[float] = None
+        pk_lv: Optional[float] = None
+        fwhm: Optional[float] = None
+        smsr: Optional[float] = None
+
+        if isinstance(ana, dict):
+            for key, target in (
+                ("PK_WL_nm", "pk_wl"), ("PK_LVL_dBm", "pk_lv"),
+                ("WD_3dB_nm", "fwhm"), ("SMSR_dB", "smsr"),
+            ):
+                if ana.get(key) is not None:
+                    try:
+                        val = float(ana[key])
+                        if target == "pk_wl":
+                            pk_wl = val
+                        elif target == "pk_lv":
+                            pk_lv = val
+                        elif target == "fwhm":
+                            fwhm = val
+                        elif target == "smsr":
+                            smsr = val
+                    except (TypeError, ValueError):
+                        pass
+
+        if isinstance(anar, dict):
+            if pk_wl is None and anar.get("PK_WL_nm") is not None:
+                try:
+                    pk_wl = float(anar["PK_WL_nm"])
+                except (TypeError, ValueError):
+                    pass
+            if pk_lv is None and anar.get("PK_LVL_dBm") is not None:
+                try:
+                    pk_lv = float(anar["PK_LVL_dBm"])
+                except (TypeError, ValueError):
+                    pass
+            if smsr is None and anar.get("SMSR_dB") is not None:
+                try:
+                    smsr = float(anar["SMSR_dB"])
+                except (TypeError, ValueError):
+                    pass
+
+        # Fallback: SPWD? for FWHM only when ANA?/ANAR? didn't provide it.
+        # SMSR?/PKWL?/PKLV? return bogus "1" on this AQ6317B firmware — skip them.
+        # Peak WL/level fallback comes from WDATA/LDATA trace below.
+        if fwhm is None:
+            v = getattr(a, "query_spectral_width_nm", lambda: None)()
+            if v is not None:
+                try:
+                    fwhm = float(v)
+                except (TypeError, ValueError):
+                    pass
+
+        # WDATA/LDATA for the trace plot
         wdata = list(getattr(a, "read_wdata_trace", lambda: [])() or [])
         ldata = list(getattr(a, "read_ldata_trace", lambda: [])() or [])
         if pk_wl is None or pk_lv is None:
@@ -559,6 +892,7 @@ class SpectrumProcess:
                 pk_wl = pw
             if pk_lv is None:
                 pk_lv = pl
+
         metrics = {"pk_wl": pk_wl, "pk_lv": pk_lv, "fwhm": fwhm, "smsr": smsr, "ana": ana, "anar": anar}
         return wdata, ldata, metrics
 
@@ -567,6 +901,7 @@ class SpectrumProcess:
         params: SpectrumProcessParameters,
         wavemeter_nm: Optional[float],
         pk_wl: Optional[float],
+        cen_wl_nm: Optional[float],
         fwhm_nm: Optional[float],
         smsr_db: Optional[float],
         label: str,
@@ -580,12 +915,25 @@ class SpectrumProcess:
                         label, float(pk_wl), float(wavemeter_nm), tol
                     )
                 )
+        if params.peak_wl_check and (params.peak_wl_ll is not None or params.peak_wl_ul is not None):
+            reasons.extend(_wl_band_failures(label, "Peak WL", pk_wl, params.peak_wl_ll, params.peak_wl_ul))
+        if params.cen_wl_check and (params.cen_wl_ll is not None or params.cen_wl_ul is not None):
+            reasons.extend(
+                _wl_band_failures(label, "Cen WL", cen_wl_nm, params.cen_wl_ll, params.cen_wl_ul)
+            )
         if float(params.min_smsr_db) > 0.0:
             if smsr_db is None:
                 reasons.append("{}: SMSR not available (limit {:.2f} dB).".format(label, params.min_smsr_db))
             elif float(smsr_db) < float(params.min_smsr_db):
                 reasons.append(
                     "{}: SMSR {:.2f} dB below limit {:.2f} dB.".format(label, float(smsr_db), params.min_smsr_db)
+                )
+        if float(params.min_fwhm_nm) > 0.0:
+            if fwhm_nm is None:
+                reasons.append("{}: FWHM (SPWD) not available (min {:.4f} nm).".format(label, params.min_fwhm_nm))
+            elif float(fwhm_nm) < float(params.min_fwhm_nm):
+                reasons.append(
+                    "{}: FWHM {:.4f} nm below limit {:.4f} nm.".format(label, float(fwhm_nm), params.min_fwhm_nm)
                 )
         if float(params.max_fwhm_nm) < 900.0:
             if fwhm_nm is None:
@@ -639,6 +987,13 @@ class SpectrumProcess:
             self._emit_spectrum(executor, result)
             return result
 
+        _arm_laser_fn = getattr(executor, "notify_laser_monitor_armed", None)
+        if callable(_arm_laser_fn):
+            try:
+                _arm_laser_fn(True)
+            except Exception:
+                pass
+
         # Ando (OSA) RCP from recipe, then wavemeter range/commands from recipe (see instrument command docs).
         if not self._apply_ando_recipe(params, executor):
             result.fail_reasons.append("Failed to apply Ando settings.")
@@ -657,10 +1012,14 @@ class SpectrumProcess:
         self._emit_wavemeter(executor, result.first_wavemeter_nm)
 
         # ----- First sweep -----
-        self._emit_step_status(executor, "[1/2] First sweep — starting SGL, then peak search and WDATA/LDATA read.")
+        self._emit_step_status(executor, "[1/2] First sweep — starting SGL, then analysis read and WDATA/LDATA.")
         try:
             w1, l1, m1 = self._sweep_fetch_traces_and_metrics(
-                executor, stop_fn, params.analysis, fetch_anar=True
+                executor,
+                stop_fn,
+                params.analysis,
+                fetch_anar=True,
+                poll_wavemeter_during_wait=params.wavemeter_poll_during_first_sweep,
             )
         except Exception as ex:
             result.fail_reasons.append("First sweep failed: {}".format(ex))
@@ -683,11 +1042,17 @@ class SpectrumProcess:
             self._emit_spectrum(executor, result)
             return result
 
+        # Plot as soon as trace data is valid (before limits / peak parsing) so the UI updates immediately.
+        result.first_sweep_wdata = w1
+        result.first_sweep_ldata = l1
+        self._emit_live_trace(executor, w1, l1)
+
         if params.limits_enabled:
             lim1 = self._evaluate_limits(
                 params,
                 result.first_wavemeter_nm,
                 m1.get("pk_wl"),
+                _center_wl_nm_from_metrics(m1),
                 m1.get("fwhm"),
                 m1.get("smsr"),
                 "First sweep",
@@ -695,8 +1060,6 @@ class SpectrumProcess:
             if lim1:
                 result.fail_reasons.extend(lim1)
 
-        result.first_sweep_wdata = w1
-        result.first_sweep_ldata = l1
         _ana1 = m1.get("ana")
         if isinstance(_ana1, dict) and _ana1.get("PK_WL_nm") is not None:
             try:
@@ -724,8 +1087,7 @@ class SpectrumProcess:
         result.fwhm_first_nm = float(m1["fwhm"]) if m1.get("fwhm") is not None else None
         result.smsr_first_db = float(m1["smsr"]) if m1.get("smsr") is not None else None
         result.passed_first_sweep = len(result.fail_reasons) == 0
-        # Floating Spectrum window first, then main window First sweep tab; then wait before second sweep.
-        self._emit_live_trace(executor, w1, l1)
+        # Live trace was already emitted right after WDATA/LDATA validation.
         self._emit_step_status(
             executor,
             "[1/2] First sweep — WDATA/LDATA plotted; updating main window (First sweep tab).",
@@ -734,16 +1096,26 @@ class SpectrumProcess:
         result.spectrum_finalize_secondary_window = False
         self._emit_spectrum(executor, result)
         # Leave finalize False until second sweep completes or a failure path sets True (avoid Qt queued-slot race).
-        self._emit_step_status(
-            executor,
-            "[1/2] Waiting {:.0f} s, then set Ando CTR to ANA? peak and run second sweep.".format(
-                float(self.PAUSE_S_BEFORE_SECOND_SWEEP_S)
-            ),
-        )
-        time.sleep(float(self.PAUSE_S_BEFORE_SECOND_SWEEP_S))
+        _p1 = float(self.PAUSE_S_BEFORE_SECOND_SWEEP_S)
+        if _p1 > 0:
+            self._emit_step_status(
+                executor,
+                "[1/2] Waiting {:.0f} s, then set Ando CTR to ANA? peak and run second sweep.".format(_p1),
+            )
+            time.sleep(_p1)
+        else:
+            self._emit_step_status(
+                executor,
+                "[1/2] First sweep done — setting Ando CTR to ANA? peak and running second sweep.",
+            )
 
         if stop_fn():
-            result.fail_reasons.append("Stopped by user after first sweep.")
+            if getattr(executor, "_stop_from_user", True):
+                result.fail_reasons.append("Stopped by user after first sweep.")
+            else:
+                result.fail_reasons.append(
+                    "Arroyo laser output went OFF after first sweep — Spectrum test stopped."
+                )
             result.spectrum_finalize_secondary_window = True
             self._emit_spectrum(executor, result)
             return result
@@ -770,17 +1142,38 @@ class SpectrumProcess:
             self._emit_spectrum(executor, result)
             return result
 
-        result.second_wavemeter_nm = self._read_wavemeter_nm()
-        self._emit_wavemeter(executor, result.second_wavemeter_nm)
+        wm_here = self._read_wavemeter_nm()
+        self._emit_wavemeter(executor, wm_here)
+        result.second_wavemeter_nm = wm_here
 
-        self._emit_step_status(executor, "Preparing [2/2] second sweep — clearing live plot, then SGL + trace read.")
-        self._emit_live_trace(executor, [], [])
+        if params.auto_wl_shift_wavemeter_minus_peak and wm_here is not None:
+            try:
+                delta = float(wm_here) - float(peak_for_center)
+                result.wl_shift_applied_nm = float(delta)
+                fn = getattr(self._ando, "set_wavelength_shift_nm", None)
+                if callable(fn):
+                    fn(float(delta))
+                else:
+                    self._ando.write_command("WLSFT {:.6f}".format(float(delta)))
+                self._log(
+                    executor,
+                    "Spectrum: Ando WLSFT {:.6f} nm (wavemeter {:.6f} nm − Ando peak / CTR {:.6f} nm).".format(
+                        float(delta),
+                        float(wm_here),
+                        float(peak_for_center),
+                    ),
+                )
+            except Exception as ex:
+                self._log(executor, "Spectrum: auto WLSFT (wavemeter − peak) skipped: {}".format(ex))
+                result.wl_shift_applied_nm = None
+
+        self._emit_step_status(executor, "Preparing [2/2] second sweep — SGL + trace read (first trace stays until new data).")
 
         # ----- Second sweep -----
-        self._emit_step_status(executor, "[2/2] Second sweep — starting SGL, then peak search and WDATA/LDATA read.")
+        self._emit_step_status(executor, "[2/2] Second sweep — starting SGL, then analysis read and WDATA/LDATA.")
         try:
             w2, l2, m2 = self._sweep_fetch_traces_and_metrics(
-                executor, stop_fn, params.analysis, fetch_anar=False
+                executor, stop_fn, params.analysis, fetch_anar=False, poll_wavemeter_during_wait=False
             )
         except Exception as ex:
             result.fail_reasons.append("Second sweep failed: {}".format(ex))
@@ -805,29 +1198,36 @@ class SpectrumProcess:
             self._emit_spectrum(executor, result)
             return result
 
+        result.second_sweep_wdata = w2
+        result.second_sweep_ldata = l2
+        result.peak_wavelength_second_nm = float(m2["pk_wl"]) if m2.get("pk_wl") is not None else None
+        # Plot second sweep immediately after validation (before pass/fail limit checks).
+        self._emit_live_trace(executor, w2, l2)
+
         if params.limits_enabled:
             lim2 = self._evaluate_limits(
                 params,
                 result.second_wavemeter_nm,
                 m2.get("pk_wl"),
+                _center_wl_nm_from_metrics(m2),
                 m2.get("fwhm"),
                 m2.get("smsr"),
                 "Second sweep",
             )
             if lim2:
                 result.fail_reasons.extend(lim2)
-
-        result.second_sweep_wdata = w2
-        result.second_sweep_ldata = l2
-        result.peak_wavelength_second_nm = float(m2["pk_wl"]) if m2.get("pk_wl") is not None else None
-        self._emit_live_trace(executor, w2, l2)
-        self._emit_step_status(
-            executor,
-            "[2/2] Second sweep — WDATA/LDATA plotted in Spectrum window. Waiting {:.0f} s, then main tab + result.".format(
-                float(self.PAUSE_AFTER_SECOND_SWEEP_S),
-            ),
-        )
-        time.sleep(float(self.PAUSE_AFTER_SECOND_SWEEP_S))
+        _p2 = float(self.PAUSE_AFTER_SECOND_SWEEP_S)
+        if _p2 > 0:
+            self._emit_step_status(
+                executor,
+                "[2/2] Second sweep — plotted. Waiting {:.0f} s, then main tab + result.".format(_p2),
+            )
+            time.sleep(_p2)
+        else:
+            self._emit_step_status(
+                executor,
+                "[2/2] Second sweep — updating main tab and result.",
+            )
 
         pk_nm = float(m2["pk_wl"]) if m2.get("pk_wl") is not None else float(peak_for_center)
         pk_dbm = float(m2["pk_lv"]) if m2.get("pk_lv") is not None else 0.0

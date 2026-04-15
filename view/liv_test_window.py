@@ -27,6 +27,7 @@ except ImportError:
     pg = None
 
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar
+from view.liv_process_plot import apply_liv_phase4_overlays, build_liv_process_plot
 
 
 def _fmt(v, default="—"):
@@ -86,14 +87,16 @@ class LivTestSequenceWindow(QMainWindow):
         self._form.setContentsMargins(12, 16, 12, 12)
         self._value_labels = {}
         for key, label in [
+            ("fiber_coupled", "Fiber coupled"),
             ("min_current_mA", "Min Current (mA)"),
             ("max_current_mA", "Max Current (mA)"),
             ("increment_mA", "Increment (mA)"),
+            ("num_increments", "Num Increments"),
+            ("wait_time_ms", "Wait Time (ms)"),
             ("temperature", "Temperature (°C)"),
             ("rated_current_mA", "Rated Current (mA)"),
             ("rated_power_mW", "Rated Power (mW)"),
-            ("wait_time_ms", "Wait Time (ms)"),
-            ("num_increments", "Num Increments"),
+            ("se_data_points", "SE fit points (se_data_points)"),
         ]:
             lbl = QLabel("—")
             lbl.setMinimumWidth(80)
@@ -179,7 +182,7 @@ class LivTestSequenceWindow(QMainWindow):
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self._graph_title = QLabel("LIV — Power / Voltage / PD vs Current")
+        self._graph_title = QLabel("LIV — Power / Voltage / PD (μA) vs Current")
         self._graph_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #e6e6e6;")
         right_layout.addWidget(self._graph_title)
         stop_row = QHBoxLayout()
@@ -195,80 +198,28 @@ class LivTestSequenceWindow(QMainWindow):
             self._liv_vb_voltage = self._liv_vb_pd = None
             self._plot_widget = None
         else:
-            pw = pg.PlotWidget()
-            self._plot_widget = pw
-            pw.setBackground("w")
-            p1 = pw.getPlotItem()
-            self._p1 = p1
-            p1.getViewBox().setBackgroundColor((255, 255, 255))
-            p1.showGrid(x=True, y=True, alpha=0.5)
-            axis_pen = pg.mkPen(color="#333333", width=1)
-            p1.setLabel("bottom", "Current mA", color="#333333")
-            p1.setLabel("left", "Power (mW)", color="#333333")
-            p1.layout.setColumnMinimumWidth(0, 70)
-            p1.getAxis("left").setPen(axis_pen)
-            p1.getAxis("left").setTextPen(axis_pen)
-            p1.getAxis("bottom").setPen(axis_pen)
-            p1.getAxis("bottom").setTextPen(axis_pen)
-            legend = p1.addLegend(offset=(10, 10), labelTextColor="#333333")
-            legend.setParentItem(p1.vb)
-            legend.anchor((1, 1), (1, 1))
-            self._liv_power_curve = pw.plot(
-                [], [], pen=pg.mkPen("#FF0000", width=2), name="Power",
-                symbol="d", symbolSize=5, symbolBrush="#FF0000", symbolPen=pg.mkPen("#FF0000")
-            )
-            # Secondary ViewBoxes must stack ABOVE the main ViewBox: its white background
-            # otherwise paints over p2/p3 and hides voltage + PD curves (only power remains visible).
-            p1.vb.setZValue(-100)
-            p2 = pg.ViewBox()
-            p1.showAxis("right")
-            p1.scene().addItem(p2)
-            p1.getAxis("right").linkToView(p2)
-            p2.setXLink(p1.vb)
-            p2.setZValue(10)
-            self._liv_vb_voltage = p2
-            p1.getAxis("right").setLabel("Voltage(v)", color="#333333")
-            p1.getAxis("right").setPen(axis_pen)
-            p1.getAxis("right").setTextPen(axis_pen)
-            self._liv_voltage_curve = pg.PlotDataItem(
-                [], [], pen=pg.mkPen("#0066FF", width=2), name="Voltage",
-                symbol="s", symbolSize=4, symbolBrush="#0066FF", symbolPen=pg.mkPen("#0066FF")
-            )
-            p2.addItem(self._liv_voltage_curve)
-            legend.addItem(self._liv_voltage_curve, "Voltage")
-            p3 = pg.ViewBox()
-            ax3 = pg.AxisItem("right")
-            p1.layout.addItem(ax3, 2, 3)
-            p1.layout.setColumnMinimumWidth(3, 72)
-            p1.scene().addItem(p3)
-            ax3.linkToView(p3)
-            p3.setXLink(p1.vb)
-            p3.setZValue(10)
-            self._liv_vb_pd = p3
-            ax3.setLabel("PD current (MDI)", color="#333333")
-            ax3.setPen(axis_pen)
-            ax3.setTextPen(axis_pen)
-            self._liv_pd_curve = pg.PlotDataItem(
-                [], [], pen=pg.mkPen("#000000", width=2), name="PD (MDI)",
-                symbol="t", symbolSize=4, symbolBrush="#000000", symbolPen=pg.mkPen("#000000")
-            )
-            p3.addItem(self._liv_pd_curve)
-            legend.addItem(self._liv_pd_curve, "PD (MDI)")
-
-            def _sync():
-                r = p1.vb.sceneBoundingRect()
-                p2.setGeometry(r)
-                p3.setGeometry(r)
-                p2.linkedViewChanged(p1.vb, p2.XAxis)
-                p3.linkedViewChanged(p1.vb, p3.XAxis)
-
-            _sync()
-            p1.vb.sigResized.connect(_sync)
-            right_layout.addWidget(pw, 1)
+            built = build_liv_process_plot()
+            if built is None:
+                right_layout.addWidget(QLabel("pyqtgraph required for graphs."))
+                self._liv_power_curve = self._liv_voltage_curve = self._liv_pd_curve = None
+                self._liv_vb_voltage = self._liv_vb_pd = None
+                self._plot_widget = None
+            else:
+                self._plot_widget = built.plot_widget
+                self._p1 = built.p1
+                self._liv_power_curve = built.power_curve
+                self._liv_voltage_curve = built.voltage_curve
+                self._liv_pd_curve = built.pd_curve
+                self._liv_vb_voltage = built.vb_voltage
+                self._liv_vb_pd = built.vb_pd
+                right_layout.addWidget(built.series_checkbox_row)
+                right_layout.addWidget(built.plot_widget, 1)
 
         hint = QLabel(
-            "Graph: green = Ith | orange = Irated | blue = Prated | "
-            "magenta ★ = P@Ir | cyan ◆ = I@Pr | purple = slope-fit window"
+            "Graph: green vertical = Ith | orange = Ir construction (up to L–I, then horizontal = P@Ir) | "
+            "blue = Pr construction (along to L–I, then down = I@Pr) | ★ = P@Ir | ◆ = I@Pr | "
+            "purple dashed = P=SE·(I−Ith), "
+            "gold bar = SE fit window, green ◆ = (Ith,0), text = Ith & SE values."
         )
         hint.setStyleSheet("color: #888; font-size: 10px;")
         hint.setWordWrap(True)
@@ -327,19 +278,21 @@ class LivTestSequenceWindow(QMainWindow):
         sb.setValue(sb.maximum())
 
     def set_params(self, params: dict):
-        """Set left-side recipe labels from LIV recipe params."""
+        """Set left-side recipe labels from full LIV recipe params (OPERATIONS.LIV + computed num_increments)."""
         self._recipe_params = dict(params) if params else {}
         if not params:
             return
         key_map = [
+            ("fiber_coupled", ("fiber_coupled", "FiberCoupled")),
             ("min_current_mA", ("min_current_mA", "min_current")),
             ("max_current_mA", ("max_current_mA", "max_current")),
             ("increment_mA", ("increment_mA", "increment")),
+            ("num_increments", ("num_increments",)),
+            ("wait_time_ms", ("wait_time_ms", "wait_time")),
             ("temperature", ("temperature", "Temperature")),
             ("rated_current_mA", ("rated_current_mA", "rated_current")),
             ("rated_power_mW", ("rated_power_mW", "rated_power")),
-            ("wait_time_ms", ("wait_time_ms", "wait_time")),
-            ("num_increments", ("num_increments",)),
+            ("se_data_points", ("se_data_points",)),
         ]
         for label_key, param_keys in key_map:
             val = None
@@ -347,7 +300,18 @@ class LivTestSequenceWindow(QMainWindow):
                 if k in params:
                     val = params[k]
                     break
-            if label_key in self._value_labels:
+            if label_key not in self._value_labels:
+                continue
+            if label_key == "fiber_coupled":
+                if isinstance(val, bool):
+                    txt = "Yes" if val else "No"
+                elif val is None:
+                    txt = "—"
+                else:
+                    s = str(val).strip().lower()
+                    txt = "Yes" if s in ("1", "true", "yes", "on") else "No" if s in ("0", "false", "no", "off") else _fmt(val)
+                self._value_labels[label_key].setText(txt)
+            else:
                 self._value_labels[label_key].setText(_fmt(val))
 
     def _liv_autorange_secondary_y_axes(self) -> None:
@@ -357,10 +321,12 @@ class LivTestSequenceWindow(QMainWindow):
         n = len(self._currents)
         if n < 1:
             return
-        for vb, series in (
-            (getattr(self, "_liv_vb_voltage", None), self._voltages),
-            (getattr(self, "_liv_vb_pd", None), self._pds),
+        for curve, vb, series in (
+            (getattr(self, "_liv_voltage_curve", None), getattr(self, "_liv_vb_voltage", None), self._voltages),
+            (getattr(self, "_liv_pd_curve", None), getattr(self, "_liv_vb_pd", None), self._pds),
         ):
+            if curve is not None and hasattr(curve, "isVisible") and not curve.isVisible():
+                continue
             if vb is None or len(series) < n:
                 continue
             try:
@@ -476,81 +442,21 @@ class LivTestSequenceWindow(QMainWindow):
 
         cur = list(ga("current_array", []) or [])
         pwr = list(ga("power_array", []) or [])
+        if not pwr:
+            pwr = list(ga("gentec_power_array", []) or [])
         if _PG_AVAILABLE and self._p1 is not None and len(cur) == len(pwr) and len(cur) > 1:
             self._clear_result_overlays()
-            dash = Qt.DashLine
-            # Ith vertical
-            if ith > 0 and cur and ith <= max(cur) * 1.05:
-                ln = pg.InfiniteLine(pos=ith, angle=90, pen=pg.mkPen("#2e7d32", width=2, style=dash))
-                ln.setZValue(5)
-                self._p1.addItem(ln)
-                self._overlay_items.append(ln)
-            # Irated vertical
-            if ir_m > 0 and cur and min(cur) <= ir_m <= max(cur) * 1.02:
-                ln2 = pg.InfiniteLine(pos=ir_m, angle=90, pen=pg.mkPen("#e65100", width=2, style=dash))
-                ln2.setZValue(5)
-                self._p1.addItem(ln2)
-                self._overlay_items.append(ln2)
-            # Prated horizontal (power axis)
-            if pr_mw > 0:
-                hl = pg.InfiniteLine(pos=pr_mw, angle=0, pen=pg.mkPen("#1565c0", width=2, style=dash))
-                hl.setZValue(5)
-                self._p1.addItem(hl)
-                self._overlay_items.append(hl)
-            # P @ Ir
-            if ir_m > 0 and p_ir >= 0:
-                sc = pg.ScatterPlotItem(
-                    [ir_m], [p_ir], size=14, pen=pg.mkPen("#c2185b", width=2),
-                    brush=pg.mkBrush(200, 25, 90, 200), symbol="star",
-                )
-                sc.setZValue(8)
-                self._p1.addItem(sc)
-                self._overlay_items.append(sc)
-            # I @ Pr
-            if pr_mw > 0 and i_pr >= 0:
-                sc2 = pg.ScatterPlotItem(
-                    [i_pr], [pr_mw], size=12, pen=pg.mkPen("#00838f", width=2),
-                    brush=pg.mkBrush(0, 130, 150, 200), symbol="d",
-                )
-                sc2.setZValue(8)
-                self._p1.addItem(sc2)
-                self._overlay_items.append(sc2)
-            # Slope-fit window (measured points)
-            sfc = list(ga("slope_fit_currents", []) or [])
-            sfp = list(ga("slope_fit_powers", []) or [])
-            if len(sfc) >= 2 and len(sfc) == len(sfp):
-                fit_seg = pg.PlotDataItem(
-                    sfc, sfp, pen=pg.mkPen("#6a1b9a", width=4), name="SE fit window",
-                )
-                fit_seg.setZValue(6)
-                self._p1.addItem(fit_seg)
-                self._overlay_items.append(fit_seg)
-            # Extrapolated line y = SE * (x - Ith) for x from Ith to max current
-            if se > 1e-9 and ith >= 0 and cur:
-                x_max = max(cur)
-                xs = []
-                ys = []
-                for i in range(41):
-                    t = i / 40.0
-                    x = ith + t * (x_max - ith)
-                    y = se * (x - ith)
-                    if y >= 0:
-                        xs.append(x)
-                        ys.append(y)
-                if len(xs) > 1:
-                    ext = pg.PlotDataItem(
-                        xs, ys, pen=pg.mkPen("#6a1b9a", width=1, style=dash),
-                    )
-                    ext.setZValue(4)
-                    self._p1.addItem(ext)
-                    self._overlay_items.append(ext)
+            apply_liv_phase4_overlays(self._p1, pg, r, rp, self._overlay_items)
 
-        self._graph_title.setText("LIV — sweep complete | overlays = calibration analysis")
+        self._graph_title.setText(
+            "LIV — sweep complete | orange = P@Ir construction | blue = I@Pr construction | "
+            "purple = P=SE·(I−Ith) | gold = linear fit | green ◆ = Ith"
+        )
 
-    def on_plot_update(self, current: float, power: float, voltage: float, pd: float = 0.0):
+    def on_plot_update(self, current: float, power: float, voltage: float, pd: float = 0.0, tec_temp: float = 0.0):
         """
         One point per sweep step: Gentec power + Arroyo LAS:LDV (V) + LAS:MDI (raw), vs readback current.
-        Fourth argument must be supplied by liv_plot_update (4-float signal).
+        Fifth arg is TEC temperature (°C) from LIV; unused for plotting (Main GUI uses it for live sync).
         """
         self._currents.append(current)
         self._powers.append(power)

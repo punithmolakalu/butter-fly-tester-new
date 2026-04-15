@@ -5,6 +5,7 @@ Opens maximized on the secondary monitor when user clicks New Recipe from the ma
 import sys
 import json
 import os
+from typing import Any, Dict, Optional
 from PyQt5.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -23,6 +24,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QFileDialog,
     QMessageBox,
+    QInputDialog,
     QFormLayout,
     QFrame,
     QSizePolicy,
@@ -32,14 +34,6 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar
-
-# Arrow icons for spinbox (up/down) from resource folder
-_resource_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "resource")
-def _arrow_url(name):
-    p = os.path.abspath(os.path.join(_resource_dir, name + ".png")).replace("\\", "/").replace(" ", "%20")
-    return "file:///" + p if os.name == "nt" else "file://" + p
-_arrow_up = _arrow_url("arrow_up")
-_arrow_down = _arrow_url("arrow_down")
 
 # Shared dark theme for all recipe tab content (match Wavemeter Settings layout exactly)
 RECIPE_TAB_STYLESHEET = """
@@ -63,11 +57,17 @@ RECIPE_TAB_STYLESHEET = """
         width: 26px; min-width: 26px; height: 16px; min-height: 16px; background-color: #3d3d3d;
         border-top: 1px solid #505050; border-left: 1px solid #505050; border-right: 1px solid #252525; border-bottom: 1px solid #252525; }
     QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background-color: #4a4a4a; }
-    QSpinBox::up-arrow { width: 16px; height: 16px; image: url("%s"); }
-    QSpinBox::down-arrow { width: 16px; height: 16px; image: url("%s"); }
-    QDoubleSpinBox::up-arrow { width: 16px; height: 16px; image: url("%s"); }
-    QDoubleSpinBox::down-arrow { width: 16px; height: 16px; image: url("%s"); }
-""" % (_arrow_up, _arrow_down, _arrow_up, _arrow_down) + """
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+        image: none; width: 0px; height: 0px;
+        border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 7px solid #e8e8f0;
+        margin-right: 5px; margin-bottom: 1px;
+    }
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+        image: none; width: 0px; height: 0px;
+        border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid #e8e8f0;
+        margin-right: 5px; margin-top: 1px;
+    }
+""" + """
     QComboBox { background-color: #1E1E1E !important; color: #FFFFFF !important; border: 1px solid #333333;
         border-radius: 2px; padding: 4px 24px 4px 6px; font-size: 12px; }
     QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 20px;
@@ -96,19 +96,26 @@ _TS_RECIPE_DEFAULTS = {
     "delta_wl_per_c_enable": False,
     "delta_wl_per_c_min": -1.0,
     "delta_wl_per_c_max": 1.0,
+    # Minimum stable temperature span (°C) required after an exceed before another is allowed.
+    "RecoveryStep_C": 0.7,
+    # Consecutive exceeds allowed before resetting the counter (no fail).
+    "RecoverySteps": 2,
+    "SMSR_correction_enable": False,
+    "ThorlabsRequired": False,
 }
 
 
 class RecipeWindow(QMainWindow):
-    """Emitted with absolute path after SAVE writes the file (main Recipe tab reloads from disk)."""
-    recipe_saved = pyqtSignal(str)
+    """Full-screen recipe editor (NEW RECIPE)."""
+
+    recipe_saved = pyqtSignal(str)  # absolute path after SAVE writes the file (main window may ignore for tab preview)
 
     def __init__(self, parent=None):
         super().__init__(None)
         self.setWindowTitle("NEW RECIPE")
 
         self.setGeometry(100, 100, 1200, 800)
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(880, 560)
 
         self.default_font = QFont()
         self.default_font.setPointSize(10)
@@ -126,6 +133,11 @@ class RecipeWindow(QMainWindow):
         self.test_sequence_combos = []
         self.saved_selections = {}
         self._suppress_sequence_rule = False
+        # Last loaded PASS_FAIL_CRITERIA (merge on save so keys not in the LIV grid are preserved).
+        self._pass_fail_criteria_backup = {}
+        # While loading a file, do not autosave on every setText (limits / criteria).
+        self._suppress_recipe_autosave = False
+        self._recipe_autosave_timer: Optional[QTimer] = None
 
         self._create_ui()
 
@@ -181,7 +193,7 @@ class RecipeWindow(QMainWindow):
         top_layout.addWidget(save_path_label)
         self.savePathEdit = QLineEdit()
         self.savePathEdit.setFont(self.input_font)
-        self.savePathEdit.setMinimumWidth(500)
+        self.savePathEdit.setMinimumWidth(200)
         top_layout.addWidget(self.savePathEdit)
         self.browseBtn = QPushButton("Browse")
         self.browseBtn.setFont(self.button_font)
@@ -199,12 +211,14 @@ class RecipeWindow(QMainWindow):
         main_layout.addWidget(top_frame)
 
         self.tabWidget = QTabWidget()
-        main_layout.addWidget(self.tabWidget)
+        self.tabWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        main_layout.addWidget(self.tabWidget, 1)
         self._create_general_tab()
         self._create_per_tab()
         self._create_liv_tab()
         self._create_spectrum_tab()
         self._create_temperature_stability_tab()
+        self._wire_limits_autosave()
 
     def _create_general_tab(self):
         gen_tab = QWidget()
@@ -283,8 +297,13 @@ class RecipeWindow(QMainWindow):
         self._apply_font_to_widget(self.wavelengthEdit, 'input')
         seq_header_layout.addWidget(self.wavelengthEdit)
         seq_header_layout.addSpacing(24)
-        self.smsrCheckBox = QCheckBox("SMSR")
+        self.smsrCheckBox = QCheckBox("SMSR Correction")
         self.smsrCheckBox.setChecked(False)
+        self.smsrCheckBox.setToolTip(
+            "When checked: WAVEMETER → smsr is enabled, and Temperature Stability uses "
+            "corrected SMSR = measured SMSR (dB) − peak level (dBm) for limits, plots, and CSV "
+            "(saved as SMSR_correction_enable on each TS step)."
+        )
         self._apply_font_to_widget(self.smsrCheckBox, 'label')
         seq_header_layout.addWidget(self.smsrCheckBox)
         rcp_gen_layout.addLayout(seq_header_layout)
@@ -436,9 +455,14 @@ class RecipeWindow(QMainWindow):
         motor_layout.addRow("Setup speed (°/s):", self.setupSpeedEdit)
         self.startAngleEdit = QLineEdit()
         self.startAngleEdit.setFixedWidth(INPUT_WIDTH)
+        self.startAngleEdit.setToolTip("PRM absolute angle (degrees) before the sweep.")
         motor_layout.addRow("Starting Angle:", self.startAngleEdit)
         self.travelDistEdit = QLineEdit()
         self.travelDistEdit.setFixedWidth(INPUT_WIDTH)
+        self.travelDistEdit.setToolTip(
+            "PRM rotation during Thorlabs sampling (degrees), not actuator mm. "
+            "Sweep runs from Starting Angle to Starting Angle + Travel Distance at Meas speed."
+        )
         motor_layout.addRow("Travel Distance:", self.travelDistEdit)
         center_layout.addWidget(motor_group, 0)
         act_group = QGroupBox("Actuator Settings")
@@ -449,9 +473,15 @@ class RecipeWindow(QMainWindow):
         act_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.actSpeedEdit = QLineEdit()
         self.actSpeedEdit.setFixedWidth(INPUT_WIDTH)
+        self.actSpeedEdit.setToolTip(
+            "Linear actuator B: speed in mm/s used to estimate move duration after moveb (serial command is distance only)."
+        )
         act_layout.addRow("Speed:", self.actSpeedEdit)
         self.actDistEdit = QLineEdit()
         self.actDistEdit.setFixedWidth(INPUT_WIDTH)
+        self.actDistEdit.setToolTip(
+            "Linear actuator B: travel in millimetres for moveb before PER (not PRM Travel Distance)."
+        )
         act_layout.addRow("Distance:", self.actDistEdit)
         center_layout.addWidget(act_group, 0)
         per_layout.addWidget(center_widget, 0)
@@ -539,19 +569,36 @@ class RecipeWindow(QMainWindow):
             ("IT", "mA", "mA"),
             ("PD @ Ir", "", "")
         ]
+        self.liv_criteria_entries = {}
         for i, (param, unit1, unit2) in enumerate(criteria_params):
             row = i + 1
             criteria_layout.addWidget(QLabel(param), row, 0)
             ll_entry = QLineEdit("0")
-            criteria_layout.addWidget(ll_entry, row, 1)
+            ll_entry.setFixedWidth(INPUT_WIDTH)
+            # One cell per column: line edit + unit label in a row (do not stack two widgets on the same grid cell).
+            ll_wrap = QWidget()
+            ll_h = QHBoxLayout(ll_wrap)
+            ll_h.setContentsMargins(0, 0, 0, 0)
+            ll_h.setSpacing(4)
+            ll_h.addWidget(ll_entry)
             if unit1:
-                criteria_layout.addWidget(QLabel(unit1), row, 1, Qt.AlignmentFlag.AlignRight)
+                ll_h.addWidget(QLabel(unit1))
+            ll_h.addStretch(1)
+            criteria_layout.addWidget(ll_wrap, row, 1)
             ul_entry = QLineEdit("0")
-            criteria_layout.addWidget(ul_entry, row, 2)
+            ul_entry.setFixedWidth(INPUT_WIDTH)
+            ul_wrap = QWidget()
+            ul_h = QHBoxLayout(ul_wrap)
+            ul_h.setContentsMargins(0, 0, 0, 0)
+            ul_h.setSpacing(4)
+            ul_h.addWidget(ul_entry)
             if unit2:
-                criteria_layout.addWidget(QLabel(unit2), row, 2, Qt.AlignmentFlag.AlignRight)
+                ul_h.addWidget(QLabel(unit2))
+            ul_h.addStretch(1)
+            criteria_layout.addWidget(ul_wrap, row, 2)
             enable_check = QCheckBox()
             criteria_layout.addWidget(enable_check, row, 3)
+            self.liv_criteria_entries[param] = {"ll": ll_entry, "ul": ul_entry, "enable": enable_check}
         right_layout.addWidget(criteria_group)
         right_layout.addStretch()
         liv_layout.addWidget(right_column, 0)
@@ -578,17 +625,22 @@ class RecipeWindow(QMainWindow):
         self._ts_slot_backup = {1: {}, 2: {}}
         outer = QWidget()
         outer.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        outer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         lay = QVBoxLayout(outer)
         lay.setContentsMargins(5, 5, 5, 5)
-        lay.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         inner = QWidget()
+        inner.setMinimumWidth(0)
+        inner.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         vl = QVBoxLayout(inner)
         vl.setContentsMargins(8, 8, 8, 8)
         vl.setSpacing(16)
-        vl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        vl.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         title1 = QLabel("Temperature Stability 1")
         title1.setStyleSheet("font-weight: bold; font-size: 14px; color: #FFFFFF;")
@@ -598,22 +650,24 @@ class RecipeWindow(QMainWindow):
         title2 = QLabel("Temperature Stability 2")
         title2.setStyleSheet("font-weight: bold; font-size: 14px; color: #FFFFFF;")
         vl.addWidget(title2)
-        row2 = QHBoxLayout()
-        row2.setSpacing(12)
-        row2.addWidget(self._build_ts_stability_panel(2), 1)
+        col2 = QVBoxLayout()
+        col2.setSpacing(8)
+        col2.addWidget(self._build_ts_stability_panel(2), 0)
         ts2_note = QLabel(
             "Temperature Stability 2 will only run if Temperature Stability 1 passes."
         )
         ts2_note.setWordWrap(True)
-        ts2_note.setStyleSheet("color: #CCCCCC; font-size: 12px; max-width: 220px;")
+        ts2_note.setStyleSheet("color: #CCCCCC; font-size: 12px;")
         ts2_note.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        row2.addWidget(ts2_note, 0)
+        ts2_note.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        col2.addWidget(ts2_note, 0)
         w2 = QWidget()
-        w2.setLayout(row2)
+        w2.setLayout(col2)
+        w2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         vl.addWidget(w2)
         vl.addStretch()
         scroll.setWidget(inner)
-        lay.addWidget(scroll)
+        lay.addWidget(scroll, 1)
         self.tabWidget.addTab(outer, "TEMP STABILITY")
 
     def _merge_ts_operation_block(self, slot: int, visible: dict) -> dict:
@@ -629,15 +683,26 @@ class RecipeWindow(QMainWindow):
         d = self._ts_slot_widgets[slot]
         w = QWidget()
         w.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        def _ts_spin(sb: QWidget, lo: int = 56, hi: int = 140) -> None:
+            sb.setMinimumWidth(lo)
+            sb.setMaximumWidth(hi)
+
+        def _ts_line(le: QLineEdit, lo: int = 48, hi: int = 120) -> None:
+            le.setMinimumWidth(lo)
+            le.setMaximumWidth(hi)
+
         root = QVBoxLayout(w)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(GROUP_SPACING)
 
-        three = QHBoxLayout()
-        three.setSpacing(12)
+        top_band = QHBoxLayout()
+        top_band.setSpacing(12)
 
         ctrl = QGroupBox("Control Parameters")
         ctrl.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        ctrl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         cg = QGridLayout(ctrl)
         cg.setSpacing(8)
         cg.setContentsMargins(*GROUP_MARGINS)
@@ -646,7 +711,7 @@ class RecipeWindow(QMainWindow):
         d["min_temp"].setRange(-200.0, 200.0)
         d["min_temp"].setDecimals(2)
         d["min_temp"].setValue(0.0)
-        d["min_temp"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["min_temp"])
         cg.addWidget(QLabel("MIN Temp"), r, 0)
         cg.addWidget(d["min_temp"], r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
@@ -655,7 +720,7 @@ class RecipeWindow(QMainWindow):
         d["max_t"].setRange(-200.0, 200.0)
         d["max_t"].setDecimals(2)
         d["max_t"].setValue(0.0)
-        d["max_t"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["max_t"])
         cg.addWidget(QLabel("MAX Temp"), r, 0)
         cg.addWidget(d["max_t"], r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
@@ -664,7 +729,7 @@ class RecipeWindow(QMainWindow):
         d["step"].setRange(0.0, 50.0)
         d["step"].setDecimals(3)
         d["step"].setValue(0.0)
-        d["step"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["step"])
         cg.addWidget(QLabel("INC"), r, 0)
         cg.addWidget(d["step"], r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
@@ -672,7 +737,7 @@ class RecipeWindow(QMainWindow):
         d["wait_ms"] = QSpinBox()
         d["wait_ms"].setRange(0, 3_600_000)
         d["wait_ms"].setValue(0)
-        d["wait_ms"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["wait_ms"])
         cg.addWidget(QLabel("WAIT TIME"), r, 0)
         cg.addWidget(d["wait_ms"], r, 1)
         cg.addWidget(QLabel("ms"), r, 2)
@@ -681,7 +746,7 @@ class RecipeWindow(QMainWindow):
         d["set_curr"].setRange(0.0, 5000.0)
         d["set_curr"].setDecimals(2)
         d["set_curr"].setValue(10.0)
-        d["set_curr"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["set_curr"], 56, 160)
         d["use_rated"] = QCheckBox("Use I@Rated_P")
         hset = QHBoxLayout()
         hset.addWidget(d["set_curr"])
@@ -695,14 +760,16 @@ class RecipeWindow(QMainWindow):
         d["initial"].setRange(-200.0, 200.0)
         d["initial"].setDecimals(2)
         d["initial"].setValue(0.0)
-        d["initial"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["initial"])
         cg.addWidget(QLabel("Init Temp"), r, 0)
         cg.addWidget(d["initial"], r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
-        three.addWidget(ctrl, 1)
+        cg.setColumnStretch(1, 1)
+        top_band.addWidget(ctrl, 1)
 
         ando = QGroupBox("Ando Parameters")
         ando.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        ando.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         ag = QGridLayout(ando)
         ag.setSpacing(8)
         ag.setContentsMargins(*GROUP_MARGINS)
@@ -711,7 +778,7 @@ class RecipeWindow(QMainWindow):
         d["span_nm"].setRange(0.0, 500.0)
         d["span_nm"].setDecimals(3)
         d["span_nm"].setValue(0.0)
-        d["span_nm"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["span_nm"])
         ag.addWidget(QLabel("Span"), r, 0)
         ag.addWidget(d["span_nm"], r, 1)
         ag.addWidget(QLabel("nm"), r, 2)
@@ -719,42 +786,82 @@ class RecipeWindow(QMainWindow):
         d["smpl"] = QSpinBox()
         d["smpl"].setRange(0, 20001)
         d["smpl"].setValue(0)
-        d["smpl"].setFixedWidth(INPUT_WIDTH)
+        _ts_spin(d["smpl"])
         ag.addWidget(QLabel("Sampling"), r, 0)
         ag.addWidget(d["smpl"], r, 1)
         r += 1
         d["continuous_scan"] = QCheckBox("Continuous Scan")
         ag.addWidget(d["continuous_scan"], r, 0, 1, 3)
+        ag.setColumnStretch(1, 1)
 
         mid_col = QWidget()
         mid_col.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        mid_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         mid_v = QVBoxLayout(mid_col)
         mid_v.setContentsMargins(0, 0, 0, 0)
         mid_v.setSpacing(8)
         mid_v.addWidget(ando)
-        off_row = QHBoxLayout()
-        off_row.setSpacing(10)
+        off_row1 = QHBoxLayout()
+        off_row1.setSpacing(10)
         d["offset1"] = QLineEdit("10")
-        d["offset1"].setFixedWidth(INPUT_WIDTH)
+        _ts_line(d["offset1"])
         d["offset2"] = QLineEdit("0")
-        d["offset2"].setFixedWidth(INPUT_WIDTH)
+        _ts_line(d["offset2"])
+        off_row1.addWidget(QLabel("Offset1"))
+        off_row1.addWidget(d["offset1"])
+        off_row1.addWidget(QLabel("Offset2"))
+        off_row1.addWidget(d["offset2"])
+        off_row1.addStretch()
+        mid_v.addLayout(off_row1)
+        off_row2 = QHBoxLayout()
+        off_row2.setSpacing(10)
         d["deg_stability"] = QSpinBox()
         d["deg_stability"].setRange(1, 50)
         d["deg_stability"].setValue(5)
-        d["deg_stability"].setFixedWidth(70)
-        off_row.addWidget(QLabel("Offset1"))
-        off_row.addWidget(d["offset1"])
-        off_row.addWidget(QLabel("Offset2"))
-        off_row.addWidget(d["offset2"])
-        off_row.addSpacing(12)
-        off_row.addWidget(QLabel("Deg of Stability"))
-        off_row.addWidget(d["deg_stability"])
-        off_row.addStretch()
-        mid_v.addLayout(off_row)
-        three.addWidget(mid_col, 1)
+        _ts_spin(d["deg_stability"], 44, 88)
+        d["deg_stability"].setToolTip(
+            "Required continuous stable temperature span (°C) to qualify, then hot→cold check. "
+            "Saved as DegOfStability."
+        )
+        off_row2.addWidget(QLabel("Deg of Stability"))
+        off_row2.addWidget(d["deg_stability"])
+        off_row2.addStretch()
+        mid_v.addLayout(off_row2)
+        d["recovery_step"] = QDoubleSpinBox()
+        d["recovery_step"].setRange(0.0, 50.0)
+        d["recovery_step"].setDecimals(2)
+        d["recovery_step"].setValue(0.7)
+        _ts_spin(d["recovery_step"])
+        d["recovery_step"].setToolTip(
+            "Min stability span (°C): minimum stable temperature range after an exceed before another exceed may occur. "
+            "Saved as RecoveryStep_C in the recipe."
+        )
+        rec_row1 = QHBoxLayout()
+        rec_row1.setSpacing(10)
+        rec_row1.addWidget(QLabel("Min stability span"))
+        rec_row1.addWidget(d["recovery_step"])
+        rec_row1.addWidget(QLabel("°C"))
+        rec_row1.addStretch()
+        mid_v.addLayout(rec_row1)
+        d["recovery_steps_count"] = QSpinBox()
+        d["recovery_steps_count"].setRange(1, 20)
+        d["recovery_steps_count"].setValue(2)
+        _ts_spin(d["recovery_steps_count"], 44, 72)
+        d["recovery_steps_count"].setToolTip(
+            "Allow this many consecutive exceed temperatures; the next consecutive exceed resets the counter "
+            "(no fail). Saved as RecoverySteps."
+        )
+        rec_row2 = QHBoxLayout()
+        rec_row2.setSpacing(10)
+        rec_row2.addWidget(QLabel("Recovery steps"))
+        rec_row2.addWidget(d["recovery_steps_count"])
+        rec_row2.addStretch()
+        mid_v.addLayout(rec_row2)
+        top_band.addWidget(mid_col, 1)
 
         lim = QGroupBox("Limits")
         lim.setStyleSheet(RECIPE_TAB_STYLESHEET)
+        lim.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         lg = QGridLayout(lim)
         lg.setSpacing(6)
         lg.setContentsMargins(*GROUP_MARGINS)
@@ -765,14 +872,18 @@ class RecipeWindow(QMainWindow):
         for hx, c in ((h_ll, 1), (h_ul, 2), (h_en, 3)):
             hx.setStyleSheet("font-weight: bold;")
             lg.addWidget(hx, 0, c)
-        limit_names = ("FWHM", "SMSR", "Width1", "Width2", "WL", "Power")
+        limit_names = ("FWHM", "SMSR", "Width1", "Width2", "WL", "Power", "Thorlabs")
         d["limits_entries"] = {}
         for ri, name in enumerate(limit_names, start=1):
-            lg.addWidget(QLabel(name), ri, 0)
+            nm = QLabel(name)
+            nm.setWordWrap(False)
+            lg.addWidget(nm, ri, 0)
             ll_e = QLineEdit("0")
-            ll_e.setFixedWidth(72)
+            ll_e.setMinimumWidth(48)
+            ll_e.setMaximumWidth(100)
             ul_e = QLineEdit("0")
-            ul_e.setFixedWidth(72)
+            ul_e.setMinimumWidth(48)
+            ul_e.setMaximumWidth(100)
             en_e = QCheckBox()
             lg.addWidget(ll_e, ri, 1)
             if name == "Power":
@@ -782,15 +893,24 @@ class RecipeWindow(QMainWindow):
                 lg.addWidget(ul_e, ri, 2)
             lg.addWidget(en_e, ri, 3)
             d["limits_entries"][name] = {"ll": ll_e, "ul": ul_e, "enable": en_e}
-        three.addWidget(lim, 1)
+        lg.setColumnStretch(1, 1)
+        lg.setColumnStretch(2, 1)
+        lim.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        top_band.addWidget(lim, 1)
 
-        root.addLayout(three)
+        root.addLayout(top_band)
 
-        foot = QHBoxLayout()
+        foot_col = QVBoxLayout()
+        foot_col.setSpacing(6)
         d["save_pdf"] = QCheckBox("Save PDF")
-        foot.addWidget(d["save_pdf"])
-        foot.addStretch()
-        root.addLayout(foot)
+        foot_col.addWidget(d["save_pdf"])
+        d["require_thorlabs"] = QCheckBox("Require Thorlabs")
+        d["require_thorlabs"].setToolTip(
+            "When checked, temperature stability requires a connected Thorlabs powermeter. "
+            "Saved as ThorlabsRequired."
+        )
+        foot_col.addWidget(d["require_thorlabs"])
+        root.addLayout(foot_col)
 
         return w
 
@@ -1151,6 +1271,72 @@ class RecipeWindow(QMainWindow):
         wavemeter_layout.addWidget(center_widget, 0)
         return wavemeter_tab
 
+    def _load_liv_pass_fail_into_ui(self, liv_pfc: dict) -> None:
+        """Fill LIV Pass/Fail grid from PASS_FAIL_CRITERIA.LIV (nested ll/ul/enable or legacy flat min/max keys)."""
+        ent = getattr(self, "liv_criteria_entries", None) or {}
+        if not isinstance(liv_pfc, dict):
+            return
+        legacy_flat = {
+            "IT": ("min_threshold_mA", "max_threshold_mA"),
+            "SE1": ("min_slope_efficiency", "max_slope_efficiency"),
+            "L @ Ir": ("min_power_at_rated_mW", "max_power_at_rated_mW"),
+            "I @ Lr": ("min_current_at_rated_mA", "max_current_at_rated_mA"),
+            "V @ Ir": ("min_voltage_at_Ir_V", "max_voltage_at_Ir_V"),
+            "V @ Lr": ("min_voltage_at_Lr_V", "max_voltage_at_Lr_V"),
+            "PD @ Ir": ("min_pd_at_Ir", "max_pd_at_Ir"),
+        }
+        for param, widgets in ent.items():
+            if not isinstance(widgets, dict):
+                continue
+            sub = liv_pfc.get(param)
+            if isinstance(sub, dict):
+                ll = sub.get("ll", sub.get("LL", ""))
+                ul = sub.get("ul", sub.get("UL", ""))
+                en = sub.get("enable", sub.get("Enable", False))
+                if widgets.get("ll") is not None:
+                    widgets["ll"].setText("" if ll is None else str(ll))
+                if widgets.get("ul") is not None:
+                    widgets["ul"].setText("" if ul is None else str(ul))
+                if widgets.get("enable") is not None:
+                    widgets["enable"].setChecked(bool(en))
+            elif param in legacy_flat:
+                kmin, kmax = legacy_flat[param]
+                if kmin in liv_pfc or kmax in liv_pfc:
+                    if widgets.get("ll") is not None:
+                        widgets["ll"].setText(str(liv_pfc.get(kmin, "") or ""))
+                    if widgets.get("ul") is not None:
+                        widgets["ul"].setText(str(liv_pfc.get(kmax, "") or ""))
+                    if widgets.get("enable") is not None:
+                        widgets["enable"].setChecked(True)
+
+    @staticmethod
+    def _sanitize_recipe_filename_stem(name: str) -> str:
+        stem = "".join(c for c in (name or "").strip() if c not in '<>:"/\\|?*').strip()
+        return stem or "recipe"
+
+    def _recipe_save_extension(self) -> str:
+        """Keep the same format as the loaded file when applicable (.ini / .rcp / .json)."""
+        p = getattr(self, "_last_saved_or_loaded_path", None)
+        if p:
+            ext = os.path.splitext(p)[1].lower()
+            if ext in (".ini", ".rcp", ".json"):
+                return ext
+        return ".ini"
+
+    def _disk_bound_recipe_stem(self) -> Optional[str]:
+        """File name stem of the recipe file on disk we last loaded or saved to, or None."""
+        p = getattr(self, "_last_saved_or_loaded_path", None)
+        if not p or not os.path.isfile(p):
+            return None
+        return os.path.splitext(os.path.basename(p))[0]
+
+    def _stem_matches_disk_binding(self, safe_name: str) -> bool:
+        """False when the user changed RECIPE NAME vs the file autosave is bound to — skip autosave."""
+        disk = self._disk_bound_recipe_stem()
+        if disk is None:
+            return True
+        return disk.lower() == (safe_name or "").lower()
+
     def _browse_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Select Save Directory")
         if path:
@@ -1165,8 +1351,8 @@ class RecipeWindow(QMainWindow):
             self,
             "Select Recipe File",
             recipes_folder,
-            "All Recipe Files (*.json *.JSON *.rcp *.RCP *.ini *.INI);;"
-            "JSON Files (*.json *.JSON);;All Files (*.*)"
+            "INI / RCP (*.ini *.INI *.rcp *.RCP);;"
+            "All Recipe Files (*.ini *.INI *.rcp *.RCP *.json *.JSON);;All Files (*.*)"
         )
         if filename:
             self.recipePathEdit.setText(filename)
@@ -1174,6 +1360,7 @@ class RecipeWindow(QMainWindow):
 
     def _load_recipe_data(self, filepath: str):
         try:
+            self._suppress_recipe_autosave = True
             from operations.recipe_io import load_recipe_file
 
             data = load_recipe_file(filepath)
@@ -1240,6 +1427,12 @@ class RecipeWindow(QMainWindow):
             safe_set_text(self.incEdit, liv.get('increment_mA', liv.get('INC', '')))
             safe_set_text(self.waitTimeEdit, liv.get('wait_time_ms', liv.get('WAIT TIME', '')))
             safe_set_value(self.tempSpin, liv.get('Temperature', liv.get('temperature', 25)))
+            try:
+                mult_v = liv.get("multiplier", liv.get("Mult", liv.get("mult", None)))
+                if mult_v is not None and mult_v != "":
+                    self.multSpin.setValue(max(0, min(100, int(float(mult_v)))))
+            except Exception:
+                pass
             safe_set_text(self.ratedCurrentEdit, liv.get('rated_current_mA', ''))
             safe_set_text(self.ratedPowerEdit, liv.get('rated_power_mW', ''))
             safe_set_text(self.sePointsEdit, liv.get('se_data_points', ''))
@@ -1291,9 +1484,22 @@ class RecipeWindow(QMainWindow):
                 safe_set_value(self.andoCenterSpin, wavelength)
             spec = get_section(data, 'spec') or {}
             wavemeter = spec.get('WAVEMETER', data.get('WAVEMETER', {}))
-            if isinstance(wavemeter, dict):
-                safe_set_check(self.smsrCheckBox, wavemeter.get('smsr', False))
+            if not isinstance(wavemeter, dict):
+                wavemeter = {}
             ops = data.get("OPERATIONS") or data.get("operations") or {}
+            smsr_corr_any = bool(wavemeter.get("smsr", False))
+            if isinstance(ops, dict):
+                for _slot in (1, 2):
+                    _key = "Temperature Stability {}".format(_slot)
+                    _ts = ops.get(_key) if isinstance(ops.get(_key), dict) else {}
+                    if isinstance(_ts, dict):
+                        smsr_corr_any = smsr_corr_any or bool(
+                            _ts.get(
+                                "SMSR_correction_enable",
+                                _ts.get("EnableSMSR_correction", _ts.get("smsr_correction_enable", False)),
+                            )
+                        )
+            safe_set_check(self.smsrCheckBox, smsr_corr_any)
             if isinstance(ops, dict) and getattr(self, "_ts_slot_widgets", None):
                 for slot in (1, 2):
                     key = "Temperature Stability {}".format(slot)
@@ -1318,7 +1524,19 @@ class RecipeWindow(QMainWindow):
                     safe_set_text(d["offset1"], ts.get("Offset1_nm", ts.get("offset1", "10")))
                     safe_set_text(d["offset2"], ts.get("Offset2_nm", ts.get("offset2", "0")))
                     safe_set_check(d["save_pdf"], ts.get("SavePDF", ts.get("save_pdf", False)))
+                    safe_set_check(
+                        d["require_thorlabs"],
+                        ts.get("ThorlabsRequired", ts.get("thorlabs_required", False)),
+                    )
                     safe_set_value(d["deg_stability"], int(ts.get("DegOfStability", ts.get("deg_of_stability", 5)) or 5))
+                    rs = ts.get("RecoveryStep_C", ts.get("recovery_step_C", ts.get("MinStabilitySpanAfterExceed_C")))
+                    if rs is None or rs == "":
+                        rs = 0.7
+                    safe_set_value(d["recovery_step"], float(rs))
+                    safe_set_value(
+                        d["recovery_steps_count"],
+                        int(ts.get("RecoverySteps", ts.get("recovery_steps", ts.get("Recovery_Steps", 2))) or 2),
+                    )
                     lim = ts.get("limits") if isinstance(ts.get("limits"), dict) else {}
                     for pname, ent in (d.get("limits_entries") or {}).items():
                         if not isinstance(ent, dict):
@@ -1328,6 +1546,10 @@ class RecipeWindow(QMainWindow):
                         if pname != "Power" and ent.get("ul") is not None:
                             safe_set_text(ent["ul"], sub.get("ul", sub.get("UL", "0")))
                         safe_set_check(ent.get("enable"), sub.get("enable", sub.get("Enable", False)))
+            pfc = data.get("PASS_FAIL_CRITERIA") or data.get("PassFailCriteria") or {}
+            if isinstance(pfc, dict):
+                self._pass_fail_criteria_backup = dict(pfc)
+                self._load_liv_pass_fail_into_ui(pfc.get("LIV") or {})
             # So Save works without Browse: remember file and set save folder.
             self._last_saved_or_loaded_path = os.path.abspath(filepath)
             ddir = os.path.dirname(self._last_saved_or_loaded_path)
@@ -1336,27 +1558,12 @@ class RecipeWindow(QMainWindow):
             QMessageBox.information(self, "Recipe Loaded", f"Recipe loaded successfully:\n{recipe_name}")
         except Exception as e:
             QMessageBox.warning(self, "Load Error", f"Failed to load recipe:\n{str(e)}")
+        finally:
+            self._suppress_recipe_autosave = False
 
-    def _save_recipe(self):
-        save_path = (self.savePathEdit.text() or "").strip()
-        loaded = getattr(self, "_last_saved_or_loaded_path", None)
-        # After Load Recipe, folder is filled automatically; still allow save if only linked path exists.
-        if not save_path and loaded:
-            save_path = os.path.dirname(os.path.abspath(loaded))
-            self.savePathEdit.setText(save_path)
-            self.save_path = save_path
-        if not save_path:
-            QMessageBox.critical(
-                self,
-                "Error",
-                "Save path not selected.\n\n"
-                "Click Browse to choose a folder, or use Load Recipe — the folder is set automatically.",
-            )
-            return
-        recipe_name = (self.recipeNameEdit.text() or "").strip()
-        if not recipe_name:
-            QMessageBox.critical(self, "Error", "Recipe name is empty")
-            return
+    def _build_recipe_dict_from_ui(self) -> Dict[str, Any]:
+        """Full recipe dict from current editor state (same as Save)."""
+        recipe_name = (self.recipeNameEdit.text() or "").strip() or "recipe"
         test_sequence = [combo.currentText() if combo.currentText() else "" for combo in self.test_sequence_combos]
 
         def get_text(widget, default=""):
@@ -1384,7 +1591,6 @@ class RecipeWindow(QMainWindow):
                 return default
 
         def get_float_from_lineedit(widget, default=0.0):
-            """Line edits may be empty; float('') raises — use default instead."""
             raw = (get_text(widget, "") or "").strip()
             if raw == "":
                 return float(default)
@@ -1408,8 +1614,7 @@ class RecipeWindow(QMainWindow):
         drive_cur = float(get_value(self.andoCurrentSpin, 0.0))
         if drive_cur <= 0:
             drive_cur = float(get_float_from_lineedit(self.ratedCurrentEdit, 0.0))
-        recipe = {
-            # Top-level keys: match hand-edited / shipped recipes so load + Run work without relying only on GENERAL.*
+        recipe: Dict[str, Any] = {
             "Recipe_Name": recipe_name,
             "Description": comments_text,
             "TEST_SEQUENCE": test_sequence,
@@ -1425,7 +1630,7 @@ class RecipeWindow(QMainWindow):
                 "Wavelength": wavelength,
                 "Current": drive_cur,
                 "FPPath": get_checked(self.fpPathCheck),
-                "SavePath": get_text(self.savePathEdit)
+                "SavePath": get_text(self.savePathEdit),
             },
             "OPERATIONS": {
                 "LIV": {
@@ -1445,7 +1650,7 @@ class RecipeWindow(QMainWindow):
                     "start_angle": get_text(self.startAngleEdit),
                     "travel_distance": get_text(self.travelDistEdit),
                     "actuator_speed": get_text(self.actSpeedEdit),
-                    "actuator_distance": get_text(self.actDistEdit)
+                    "actuator_distance": get_text(self.actDistEdit),
                 },
                 "SPECTRUM": {
                     "current": get_value(self.andoCurrentSpin, 0),
@@ -1489,9 +1694,9 @@ class RecipeWindow(QMainWindow):
                     "resolution": get_combo(self.resolutionCombo, "0.001nm"),
                     "sample_mode": get_combo(self.sampleModeCombo, "RUN"),
                     "averaging": get_combo(self.avgCombo, "OFF"),
-                    "smsr": get_checked(self.smsrCheckBox, False)
+                    "smsr": get_checked(self.smsrCheckBox, False),
                 },
-            }
+            },
         }
         tw = getattr(self, "_ts_slot_widgets", None)
         if isinstance(tw, dict):
@@ -1519,29 +1724,178 @@ class RecipeWindow(QMainWindow):
                     "StabilitySpan_nm": float(get_value(d["span_nm"], 0.0)),
                     "StabilitySampling": int(get_value(d["smpl"], 0)),
                     "ContinuousScan": get_checked(d["continuous_scan"], False),
+                    "SMSR_correction_enable": get_checked(self.smsrCheckBox, False),
                     "Offset1_nm": get_text(d["offset1"], "10"),
                     "Offset2_nm": get_text(d["offset2"], "0"),
                     "limits": limits_out,
                     "SavePDF": get_checked(d["save_pdf"], False),
                     "DegOfStability": int(get_value(d["deg_stability"], 5)),
+                    "RecoveryStep_C": float(get_value(d["recovery_step"], 0.7)),
+                    "RecoverySteps": int(get_value(d["recovery_steps_count"], 2)),
+                    "ThorlabsRequired": get_checked(d["require_thorlabs"], False),
                 }
                 recipe["OPERATIONS"]["Temperature Stability {}".format(slot)] = self._merge_ts_operation_block(
                     slot, visible_ts
                 )
-        safe_name = "".join(c for c in recipe_name if c not in '<>:"/\\|?*').strip() or "recipe"
-        # Overwrite the file that was loaded (keeps .json / .RCP); otherwise create .json in save folder.
-        if loaded and os.path.isfile(loaded):
-            filename = os.path.abspath(loaded)
+        pfc_out = dict(getattr(self, "_pass_fail_criteria_backup", {}) or {})
+        liv_ui = {}
+        for param, ent in getattr(self, "liv_criteria_entries", {}).items():
+            if not isinstance(ent, dict):
+                continue
+            liv_ui[param] = {
+                "ll": get_text(ent.get("ll"), "0"),
+                "ul": get_text(ent.get("ul"), "0"),
+                "enable": get_checked(ent.get("enable"), False),
+            }
+        if liv_ui:
+            liv_prev = pfc_out.get("LIV") if isinstance(pfc_out.get("LIV"), dict) else {}
+            liv_merged = dict(liv_prev)
+            liv_merged.update(liv_ui)
+            pfc_out["LIV"] = liv_merged
+        if pfc_out:
+            recipe["PASS_FAIL_CRITERIA"] = pfc_out
+        return recipe
+
+    def _write_recipe_file(self, filename: str, recipe: Dict[str, Any], emit_signal: bool = True) -> None:
+        """Write recipe to .ini (INI) or .rcp/.json (JSON). Updates paths and PASS_FAIL backup."""
+        ext = os.path.splitext(filename)[1].lower()
+        if ext == ".ini":
+            from operations.recipe_io import save_recipe_ini
+
+            save_recipe_ini(filename, recipe)
         else:
-            filename = os.path.join(save_path, f"{safe_name}.json")
-        try:
             with open(filename, "w", encoding="utf-8") as f:
                 json.dump(recipe, f, indent=4)
-            self._last_saved_or_loaded_path = os.path.abspath(filename)
-            self.savePathEdit.setText(os.path.dirname(self._last_saved_or_loaded_path))
-            self.save_path = os.path.dirname(self._last_saved_or_loaded_path)
-            QMessageBox.information(self, "Saved", f"Recipe saved:\n{filename}")
+        self._last_saved_or_loaded_path = os.path.abspath(filename)
+        self.savePathEdit.setText(os.path.dirname(self._last_saved_or_loaded_path))
+        self.save_path = os.path.dirname(self._last_saved_or_loaded_path)
+        if isinstance(recipe.get("PASS_FAIL_CRITERIA"), dict):
+            self._pass_fail_criteria_backup = dict(recipe["PASS_FAIL_CRITERIA"])
+        if emit_signal:
             self.recipe_saved.emit(self._last_saved_or_loaded_path)
+
+    def _schedule_recipe_autosave(self) -> None:
+        """Debounced save when limits / pass-fail fields change — keeps .rcp in sync without clicking Save."""
+        if getattr(self, "_suppress_recipe_autosave", False):
+            return
+        if self._recipe_autosave_timer is None:
+            self._recipe_autosave_timer = QTimer(self)
+            self._recipe_autosave_timer.setSingleShot(True)
+            self._recipe_autosave_timer.timeout.connect(self._do_recipe_autosave)
+        self._recipe_autosave_timer.stop()
+        self._recipe_autosave_timer.start(500)
+
+    def _do_recipe_autosave(self) -> None:
+        if getattr(self, "_suppress_recipe_autosave", False):
+            return
+        path = getattr(self, "_last_saved_or_loaded_path", None)
+        if not path or not os.path.isfile(path):
+            return
+        safe_name = self._sanitize_recipe_filename_stem((self.recipeNameEdit.text() or "").strip())
+        if not self._stem_matches_disk_binding(safe_name):
+            return
+        try:
+            recipe = self._build_recipe_dict_from_ui()
+            # Persist .rcp/.json/.ini without reloading main window on every keystroke
+            self._write_recipe_file(path, recipe, emit_signal=False)
+        except Exception:
+            pass
+
+    def _wire_limits_autosave(self) -> None:
+        """Autosave loaded .rcp/.ini/.json when user edits limit or LIV criteria fields."""
+
+        def hook(w):
+            if isinstance(w, QLineEdit):
+                w.textChanged.connect(self._schedule_recipe_autosave)
+            elif isinstance(w, QCheckBox):
+                w.stateChanged.connect(lambda _state: self._schedule_recipe_autosave())
+
+        for _param, ent in getattr(self, "limits_entries", {}).items():
+            if not isinstance(ent, dict):
+                continue
+            for k in ("ll", "ul"):
+                if ent.get(k):
+                    hook(ent[k])
+            if ent.get("enable"):
+                hook(ent["enable"])
+        for slot in (1, 2):
+            d = getattr(self, "_ts_slot_widgets", {}).get(slot) or {}
+            for _pname, ent in (d.get("limits_entries") or {}).items():
+                if not isinstance(ent, dict):
+                    continue
+                for k in ("ll", "ul"):
+                    if ent.get(k) is not None:
+                        hook(ent[k])
+                if ent.get("enable"):
+                    hook(ent["enable"])
+        for _param, ent in getattr(self, "liv_criteria_entries", {}).items():
+            if not isinstance(ent, dict):
+                continue
+            for k in ("ll", "ul"):
+                if ent.get(k):
+                    hook(ent[k])
+            if ent.get("enable"):
+                hook(ent["enable"])
+
+    def _save_recipe(self):
+        save_path = (self.savePathEdit.text() or "").strip()
+        loaded = getattr(self, "_last_saved_or_loaded_path", None)
+        # After Load Recipe, folder is filled automatically; still allow save if only linked path exists.
+        if not save_path and loaded:
+            save_path = os.path.dirname(os.path.abspath(loaded))
+            self.savePathEdit.setText(save_path)
+            self.save_path = save_path
+        if not save_path:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Save path not selected.\n\n"
+                "Click Browse to choose a folder, or use Load Recipe — the folder is set automatically.",
+            )
+            return
+        recipe_name = (self.recipeNameEdit.text() or "").strip()
+        if not recipe_name:
+            QMessageBox.critical(self, "Error", "Recipe name is empty")
+            return
+        safe_name = self._sanitize_recipe_filename_stem(recipe_name)
+        ext = self._recipe_save_extension()
+        disk_stem = self._disk_bound_recipe_stem()
+        if disk_stem is not None and safe_name.lower() != disk_stem.lower():
+            entered, ok = QInputDialog.getText(
+                self,
+                "Save recipe file name",
+                "The recipe name no longer matches the loaded file {!r}.\n\n"
+                "Enter the file name to save as (no extension; {} will be added):".format(disk_stem, ext),
+                text=safe_name,
+            )
+            if not ok:
+                return
+            safe_name = self._sanitize_recipe_filename_stem(entered)
+            self.recipeNameEdit.setText(safe_name)
+        filename = os.path.normpath(os.path.join(save_path, f"{safe_name}{ext}"))
+        loaded_abs = os.path.abspath(loaded) if loaded and os.path.isfile(loaded) else ""
+        if os.path.isfile(filename) and (not loaded_abs or os.path.normcase(filename) != os.path.normcase(loaded_abs)):
+            reply = QMessageBox.question(
+                self,
+                "Replace file?",
+                "A file already exists at:\n{}\n\nReplace it?".format(filename),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        try:
+            recipe = self._build_recipe_dict_from_ui()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to build recipe:\n{str(e)}")
+            return
+        try:
+            self._write_recipe_file(filename, recipe)
+            try:
+                self.recipePathEdit.setText(filename)
+            except Exception:
+                pass
+            QMessageBox.information(self, "Saved", f"Recipe saved:\n{filename}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save recipe:\n{str(e)}")
 

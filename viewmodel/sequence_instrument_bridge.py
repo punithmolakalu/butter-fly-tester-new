@@ -6,7 +6,6 @@ objects, not a separate InstrumentManager. During LIV, background polling is pau
 serial/GPIB contention.
 """
 
-import time
 from typing import Any, Optional
 
 
@@ -66,14 +65,17 @@ class SequenceInstrumentBridge:
             ("_actuator_poll_timer", lambda: getattr(vm, "_actuator_connected", False)),
             ("_ando_poll_timer", lambda: getattr(vm, "_ando_connected", False)),
             ("_wavemeter_poll_timer", lambda: getattr(vm, "_wavemeter_connected", False)),
+            # PER/LIV sequence worker + optional move thread also call PRM (Kinesis); pause UI poll to avoid
+            # concurrent get_position with the test thread (fixes intermittent None / 0° readbacks).
+            ("_prm_position_timer", lambda: getattr(vm, "_prm_connected", False)),
         ]
         for attr, should_restart in specs:
             t = getattr(vm, attr, None)
             if t is not None and getattr(t, "isActive", lambda: False)():
                 t.stop()
                 self._paused.append((t, should_restart))
-        # Let any in-flight Arroyo read_all on the worker thread finish before LIV touches serial.
-        time.sleep(0.75)
+        # Brief settle after stopping timers: the test-sequence worker sleeps ~750 ms *after* this
+        # returns so in-flight poll callbacks can finish without blocking the GUI thread.
 
     def resume_after_liv(self) -> None:
         for t, should_restart in self._paused:
@@ -83,3 +85,27 @@ class SequenceInstrumentBridge:
             except Exception:
                 pass
         self._paused.clear()
+
+    def pause_for_temperature_stability(self) -> None:
+        """
+        Like pause_for_liv (Arroyo/Ando/Thorlabs/etc. free for the worker), but keep Gentec UI polling
+        running — TS does not use Gentec, so Main tab Gentec readout can stay live.
+
+        Wavemeter UI polling is **paused** while TS runs: ANDO and wavemeter often share the same GPIB
+        interface; concurrent background reads (800 ms) with heavy OSA traffic caused timeouts and
+        dropped connections. TS does not read the wavemeter; resume restores polling when connected.
+        """
+        self._paused.clear()
+        vm = self._vm
+        specs = [
+            ("_poll_timer", lambda: getattr(vm, "_arroyo_connected", False)),
+            ("_thorlabs_poll_timer", lambda: getattr(vm, "_thorlabs_connected", False)),
+            ("_actuator_poll_timer", lambda: getattr(vm, "_actuator_connected", False)),
+            ("_ando_poll_timer", lambda: getattr(vm, "_ando_connected", False)),
+            ("_wavemeter_poll_timer", lambda: getattr(vm, "_wavemeter_connected", False)),
+        ]
+        for attr, should_restart in specs:
+            t = getattr(vm, attr, None)
+            if t is not None and getattr(t, "isActive", lambda: False)():
+                t.stop()
+                self._paused.append((t, should_restart))

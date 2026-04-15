@@ -19,7 +19,6 @@ from PyQt5.QtWidgets import (
     QWidget,
     QMessageBox,
 )
-from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QShowEvent
 import json
 import os
@@ -308,16 +307,22 @@ class NewRecipeWindow(QDialog):
             start_dir = self._saved_path
         path, _ = QFileDialog.getSaveFileName(
             self, "Save recipe", start_dir,
-            "Recipe files (*.json);;All files (*)",
+            "Recipe files (*.ini *.json);;INI (*.ini);;JSON (*.json);;All files (*)",
         )
         if not path:
             return
-        if not path.lower().endswith(".json"):
-            path = path + ".json"
+        low = path.lower()
+        if not low.endswith(".json") and not low.endswith(".ini"):
+            path = path + ".ini"
         try:
             d = self._build_recipe_dict()
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(d, f, indent=2)
+            if path.lower().endswith(".ini"):
+                from operations.recipe_io import save_recipe_ini
+
+                save_recipe_ini(path, d)
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(d, f, indent=2)
             QMessageBox.information(self, "New Recipe", "Recipe saved to:\n{}".format(path))
             self._saved_path = path
         except Exception as e:

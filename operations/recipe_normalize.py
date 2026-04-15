@@ -58,23 +58,58 @@ def hoist_recipe_blocks_into_operations(data: Any) -> None:
     """
     Mutate in-place: ensure OPERATIONS contains LIV/PER/SPECTRUM when present
     at top level or under recipe.OPERATIONS.
+
+    Merge order (later wins on duplicate keys within a block):
+    1) nested ``recipe`` / ``Recipe`` → ``OPERATIONS`` (vendor template; lowest priority)
+    2) root ``OPERATIONS`` / ``operations``
+    3) top-level blocks from the file (INI sections, flat JSON) via ``_pull_known_blocks_from_top``
+
+    Early-returning on nested ``OPERATIONS`` used to drop root/top-level SPECTRUM/LIV data so the
+    runtime and Spectrum RCP panel showed defaults or stale values instead of the recipe file.
     """
     if not isinstance(data, dict):
         return
+    op: Dict[str, Any] = {}
+
     for nest_key in ("recipe", "Recipe"):
         nested = data.get(nest_key)
-        if isinstance(nested, dict) and isinstance(nested.get("OPERATIONS"), dict) and nested["OPERATIONS"]:
-            data["OPERATIONS"] = nested["OPERATIONS"]
-            return
-    op = data.get("OPERATIONS") or data.get("operations")
-    if not isinstance(op, dict):
-        op = {}
+        if not isinstance(nested, dict):
+            continue
+        nested_op = nested.get("OPERATIONS")
+        if not isinstance(nested_op, dict) or not nested_op:
+            continue
+        for k, v in nested_op.items():
+            if isinstance(v, dict):
+                op[k] = dict(v)
+            else:
+                op[k] = v
+
+    root_op = data.get("OPERATIONS") or data.get("operations")
+    if isinstance(root_op, dict):
+        for k, v in root_op.items():
+            if isinstance(v, dict):
+                existing = op.get(k)
+                if isinstance(existing, dict):
+                    merged = dict(existing)
+                    merged.update(v)
+                    op[k] = merged
+                else:
+                    op[k] = dict(v)
+            else:
+                op[k] = v
+
     pulled = _pull_known_blocks_from_top(data)
     for ck, blk in pulled.items():
         if not isinstance(blk, dict) or not blk:
             continue
-        if ck not in op or not op[ck]:
-            op[ck] = blk
+        existing = op.get(ck)
+        if isinstance(existing, dict):
+            merged = dict(existing)
+            merged.update(blk)
+            op[ck] = merged
+        else:
+            op[ck] = dict(blk)
+
     if op:
         data["OPERATIONS"] = op
 
@@ -132,6 +167,21 @@ def normalize_loaded_recipe(data: Any) -> Any:
         g = {}
     data["GENERAL"] = g
 
+    def _coerce_bool(obj: Any, key: str) -> None:
+        if not isinstance(obj, dict) or key not in obj:
+            return
+        v = obj.get(key)
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("true", "1", "yes", "on"):
+                obj[key] = True
+            elif s in ("false", "0", "no", "off", ""):
+                obj[key] = False
+
+    for _k in ("FiberCoupled", "FPPath"):
+        _coerce_bool(data, _k)
+        _coerce_bool(g, _k)
+
     # Top-level metadata (readonly view + some scripts expect these)
     if not data.get("Recipe_Name") and not data.get("recipe_name"):
         rn = g.get("RecipeName") or g.get("recipe_name")
@@ -146,7 +196,20 @@ def normalize_loaded_recipe(data: Any) -> Any:
         if isinstance(ts, list) and ts:
             data["TEST_SEQUENCE"] = [str(x) for x in ts]
         elif isinstance(ts, str) and ts.strip():
-            data["TEST_SEQUENCE"] = [ts.strip()]
+            raw_ts = ts.strip()
+            if "," in raw_ts:
+                data["TEST_SEQUENCE"] = [x.strip() for x in raw_ts.split(",") if x.strip()]
+            else:
+                data["TEST_SEQUENCE"] = [raw_ts]
+
+    # INI / [RECIPE]: TEST_SEQUENCE may be a comma-separated string or a single step name
+    ts_top = data.get("TEST_SEQUENCE")
+    if isinstance(ts_top, str) and ts_top.strip():
+        raw_ts = ts_top.strip()
+        if "," in raw_ts:
+            data["TEST_SEQUENCE"] = [x.strip() for x in raw_ts.split(",") if x.strip()]
+        else:
+            data["TEST_SEQUENCE"] = [raw_ts]
 
     # SPECTRUM: keep Current + current in sync (save uses lowercase "current")
     spec = op.get("SPECTRUM") or op.get("spectrum")

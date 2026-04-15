@@ -343,206 +343,6 @@ class ArroyoConnection:
         return None
 
     def laser_read_current(self):
-        response = self.query(LASER["GET_CURRENT"])
-        if response:
-            try:
-                return float(str(response).strip())
-            except (ValueError, TypeError):
-                pass
-        return None
-
-    def laser_read_set_current(self):
-        response = self.query(LASER["GET_CURRENT_SET"])
-        try:
-            return float(response) if response else None
-        except (ValueError, TypeError):
-            return None
-
-    def laser_set_current(self, value) -> bool:
-        try:
-            v = float(value)
-            s = str(int(round(v))) if abs(v - round(v)) < 1e-6 else str(v)
-            return self.write_command("LAS:LDI " + s)
-        except (TypeError, ValueError):
-            return False
-
-    def laser_read_voltage(self):
-        response = self.query(LASER["GET_VOLTAGE"])
-        if response is None:
-            return None
-        try:
-            return float(str(response).strip())
-        except (ValueError, TypeError):
-            return None
-
-    def laser_read_monitor_diode_current(self):
-        response = self.query(LASER["GET_MONITOR_DIODE_CURRENT"])
-        if response is None:
-            return None
-        try:
-            s = str(response).strip().replace(",", ".")
-            m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-            return float(m.group(0)) if m else None
-        except Exception:
-            return None
-
-    def laser_read_monitor_diode_power(self):
-        response = self.query(LASER["GET_MONITOR_DIODE_POWER"])
-        if response is None:
-            return None
-        try:
-            s = str(response).strip().replace(",", ".")
-            m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-            return float(m.group(0)) if m else None
-        except Exception:
-            return None
-
-    def laser_read_monitor_diode_power(self):
-        """Read monitor diode power (PD) from the laser controller (SCPI LASER:MDP?)."""
-        try:
-            response = self.query(LASER["GET_MONITOR_DIODE_POWER"])
-            if response is None:
-                return None
-            s = str(response).strip()
-            # Be tolerant if the instrument returns units or extra characters.
-            m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-            return float(m.group(0)) if m else None
-        except Exception:
-            return None
-
-    def laser_read_monitor_diode_current(self):
-        """Read monitor diode current (PD) from the laser controller (SCPI LASER:MDI?)."""
-        try:
-            response = self.query(LASER["GET_MONITOR_DIODE_CURRENT"])
-            if response is None:
-                return None
-            s = str(response).strip()
-            # Be tolerant if the instrument returns units or extra characters.
-            m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-            return float(m.group(0)) if m else None
-        except Exception:
-            return None
-
-    def laser_read_output(self):
-        response = self.query(LASER["OUTPUT_QUERY"])
-        try:
-            return int(response) if response else None
-        except (ValueError, TypeError):
-            if response and response.strip().upper() in ['ON', '1']:
-                return 1
-            if response and response.strip().upper() in ['OFF', '0']:
-                return 0
-            return None
-
-    def laser_set_output(self, value) -> bool:
-        return self.write_command(LASER["OUTPUT_ON"] if value else LASER["OUTPUT_OFF"])
-
-    def laser_read_current_limit(self):
-        response = self.query(LASER["CURRENT_LIMIT_QUERY"])
-        try:
-            return float(response) if response else None
-        except (ValueError, TypeError):
-            return None
-
-    def laser_set_current_limit(self, value) -> bool:
-        try:
-            v = float(value)
-            s = str(int(round(v))) if abs(v - round(v)) < 1e-6 else str(v)
-            return self.write_command("LAS:LIM:LDI " + s)
-        except (TypeError, ValueError):
-            return False
-
-    def set_remote_mode(self) -> bool:
-        if not self.is_connected():
-            return False
-        if self.write_command('COMM:SETWHILERMT 1'):
-            time.sleep(0.1)
-            return True
-        return False
-
-    def set_local_mode(self) -> bool:
-        try:
-            self.write_command(COMMON["LOCAL"])
-            time.sleep(0.1)
-            return True
-        except Exception:
-            return False
-    def read_THI_limit(self):
-        for q in (TEC["TEMP_HIGH_LIMIT_QUERY"], "TEC:LIM:THI?", "TEC:LIM:TEMP:HI?"):
-            response = self.query(q)
-            if response is not None and str(response).strip():
-                try:
-                    s = str(response).strip().replace(",", ".").split()
-                    if s:
-                        return float(s[0])
-                except (ValueError, TypeError):
-                    pass
-        return None
-
-    def set_THI_limit(self, value) -> bool:
-        try:
-            v = float(value)
-            ok = self.write_command(_format_cmd(TEC["TEMP_HIGH_LIMIT"], v))
-            if ok:
-                time.sleep(0.05)
-            return ok
-        except (TypeError, ValueError):
-            return False
-
-    def read_output(self):
-        response = self.query(TEC["OUTPUT_QUERY"])
-        try:
-            return int(response) if response else None
-        except (ValueError, TypeError):
-            if response and response.strip().upper() in ['ON', '1']:
-                return 1
-            if response and response.strip().upper() in ['OFF', '0']:
-                return 0
-            return None
-
-    def set_output(self, value) -> bool:
-        return self.write_command(TEC["OUTPUT_ON"] if value else TEC["OUTPUT_OFF"])
-
-    def read_current(self):
-        response = self.query(TEC["GET_CURRENT"])
-        try:
-            return float(response) if response else None
-        except (ValueError, TypeError):
-            return None
-
-    def set_tec_current_setpoint(self, value) -> bool:
-        try:
-            v = float(value)
-            ok = self.write_command("TEC:ITE {:.4f}".format(v))
-            if ok:
-                time.sleep(0.05)
-            return ok
-        except (TypeError, ValueError):
-            return False
-
-    def set_tec_current_limit(self, value) -> bool:
-        try:
-            v = float(value)
-            ok = self.write_command("TEC:LIM:ITE {:.4f}".format(v))
-            if ok:
-                time.sleep(0.05)
-            return ok
-        except (TypeError, ValueError):
-            return False
-
-    def read_tec_current_limit(self):
-        for q in (TEC["CURRENT_LIMIT_QUERY"], "TEC:LIM:ITE?"):
-            response = self.query(q)
-            if response is not None and str(response).strip():
-                try:
-                    s = str(response).strip().replace(",", ".").split()
-                    if s:
-                        return float(s[0])
-                except (ValueError, TypeError):
-                    pass
-        return None
-
-    def laser_read_current(self):
         for cmd in (LASER["GET_CURRENT"], "LAS:I?"):
             response = self.query(cmd)
             if response:
@@ -568,7 +368,6 @@ class ArroyoConnection:
             return False
 
     def laser_read_voltage(self):
-        # Try both short and long SCPI forms across firmware variants.
         for cmd in (LASER.get("GET_VOLTAGE"), "LAS:LDV?", "LASER:LDV?"):
             if not cmd:
                 continue
@@ -580,23 +379,37 @@ class ArroyoConnection:
                     pass
         return None
 
-    def laser_read_monitor_diode_power(self):
-        """Read monitor-diode power from Arroyo (if supported by model/firmware)."""
-        for cmd in ("LAS:MDP?", "LASER:MDP?", "LAS:IPD?", "LASER:IPD?"):
-            response = self.query(cmd)
-            if response is not None and str(response).strip():
-                try:
-                    s = str(response).strip().replace(",", ".")
-                    m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
-                    if m:
-                        return float(m.group(0))
-                except Exception:
-                    pass
-        return None
-
     def laser_read_monitor_diode_current(self):
-        """Read monitor-diode current from Arroyo (if supported by model/firmware)."""
-        for cmd in ("LAS:MDI?", "LASER:MDI?", "LAS:IPD?", "LASER:IPD?"):
+        for cmd in (
+            LASER.get("GET_MONITOR_DIODE_CURRENT"),
+            "LAS:MDI?",
+            "LASER:MDI?",
+            "LAS:IPD?",
+            "LASER:IPD?",
+        ):
+            if not cmd:
+                continue
+            response = self.query(cmd)
+            if response is not None and str(response).strip():
+                try:
+                    s = str(response).strip().replace(",", ".")
+                    m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
+                    if m:
+                        return float(m.group(0))
+                except Exception:
+                    pass
+        return None
+
+    def laser_read_monitor_diode_power(self):
+        for cmd in (
+            LASER.get("GET_MONITOR_DIODE_POWER"),
+            "LAS:MDP?",
+            "LASER:MDP?",
+            "LAS:IPD?",
+            "LASER:IPD?",
+        ):
+            if not cmd:
+                continue
             response = self.query(cmd)
             if response is not None and str(response).strip():
                 try:
@@ -652,154 +465,55 @@ class ArroyoConnection:
             return True
         except Exception:
             return False
-    def read_THI_limit(self):
-        for q in (TEC["TEMP_HIGH_LIMIT_QUERY"], "TEC:LIM:THI?", "TEC:LIM:TEMP:HI?"):
-            response = self.query(q)
-            if response is not None and str(response).strip():
-                try:
-                    s = str(response).strip().replace(",", ".").split()
-                    if s:
-                        return float(s[0])
-                except (ValueError, TypeError):
-                    pass
-        return None
 
-    def set_THI_limit(self, value) -> bool:
-        try:
-            v = float(value)
-            ok = self.write_command(_format_cmd(TEC["TEMP_HIGH_LIMIT"], v))
-            if ok:
-                time.sleep(0.05)
-            return ok
-        except (TypeError, ValueError):
-            return False
-
-    def read_output(self):
-        response = self.query(TEC["OUTPUT_QUERY"])
-        try:
-            return int(response) if response else None
-        except (ValueError, TypeError):
-            if response and response.strip().upper() in ['ON', '1']:
-                return 1
-            if response and response.strip().upper() in ['OFF', '0']:
-                return 0
-            return None
-
-    def set_output(self, value) -> bool:
-        return self.write_command(TEC["OUTPUT_ON"] if value else TEC["OUTPUT_OFF"])
-
-    def read_current(self):
-        response = self.query(TEC["GET_CURRENT"])
-        try:
-            return float(response) if response else None
-        except (ValueError, TypeError):
-            return None
-
-    def set_tec_current_setpoint(self, value) -> bool:
-        try:
-            v = float(value)
-            ok = self.write_command("TEC:ITE {:.4f}".format(v))
-            if ok:
-                time.sleep(0.05)
-            return ok
-        except (TypeError, ValueError):
-            return False
-
-    def set_tec_current_limit(self, value) -> bool:
-        try:
-            v = float(value)
-            ok = self.write_command("TEC:LIM:ITE {:.4f}".format(v))
-            if ok:
-                time.sleep(0.05)
-            return ok
-        except (TypeError, ValueError):
-            return False
-
-    def read_tec_current_limit(self):
-        for q in (TEC["CURRENT_LIMIT_QUERY"], "TEC:LIM:ITE?"):
-            response = self.query(q)
-            if response is not None and str(response).strip():
-                try:
-                    s = str(response).strip().replace(",", ".").split()
-                    if s:
-                        return float(s[0])
-                except (ValueError, TypeError):
-                    pass
-        return None
-
-    def laser_read_current(self):
-        for cmd in (LASER["GET_CURRENT"], "LAS:I?"):
-            response = self.query(cmd)
-            if response:
-                try:
-                    return float(response.strip())
-                except (ValueError, TypeError):
-                    pass
-        return None
-
-    def laser_read_set_current(self):
-        response = self.query(LASER["GET_CURRENT_SET"])
-        try:
-            return float(response) if response else None
-        except (ValueError, TypeError):
-            return None
-
-    def laser_set_current(self, value) -> bool:
-        try:
-            v = float(value)
-            s = str(int(round(v))) if abs(v - round(v)) < 1e-6 else str(v)
-            return self.write_command("LAS:LDI " + s)
-        except (TypeError, ValueError):
-            return False
-
-    def laser_read_voltage(self):
-        response = self.query(LASER["GET_VOLTAGE"])
-        try:
-            return float(response) if response else None
-        except (ValueError, TypeError):
-            return None
-
-    def laser_read_output(self):
-        response = self.query(LASER["OUTPUT_QUERY"])
-        try:
-            return int(response) if response else None
-        except (ValueError, TypeError):
-            if response and response.strip().upper() in ['ON', '1']:
-                return 1
-            if response and response.strip().upper() in ['OFF', '0']:
-                return 0
-            return None
-
-    def laser_set_output(self, value) -> bool:
-        return self.write_command(LASER["OUTPUT_ON"] if value else LASER["OUTPUT_OFF"])
-
-    def laser_read_current_limit(self):
-        response = self.query(LASER["CURRENT_LIMIT_QUERY"])
-        try:
-            return float(response) if response else None
-        except (ValueError, TypeError):
-            return None
-
-    def laser_set_current_limit(self, value) -> bool:
-        try:
-            v = float(value)
-            s = str(int(round(v))) if abs(v - round(v)) < 1e-6 else str(v)
-            return self.write_command("LAS:LIM:LDI " + s)
-        except (TypeError, ValueError):
-            return False
-
-    def set_remote_mode(self) -> bool:
+    def read_gui_snapshot(self) -> dict:
+        """
+        One full readback dict for the Main GUI — same keys as ArroyoWorker.read_all / arroyo_readings_updated.
+        Safe to call from the test worker thread while UI Arroyo polling is paused.
+        """
+        out = {
+            "actual_current": None,
+            "actual_temp": None,
+            "max_current": None,
+            "max_temp": None,
+            "laser_on": None,
+            "tec_on": None,
+            "laser_current": None,
+            "laser_voltage": None,
+            "laser_set_current": None,
+            "tec_current": None,
+            "tec_voltage": None,
+            "tec_temp": None,
+            "tec_set_temp": None,
+        }
         if not self.is_connected():
-            return False
-        if self.write_command('COMM:SETWHILERMT 1'):
-            time.sleep(0.1)
-            return True
-        return False
+            out["laser_on"] = False
+            out["tec_on"] = False
+            return out
 
-    def set_local_mode(self) -> bool:
+        def _safe(callable_fn):
+            try:
+                return callable_fn()
+            except Exception:
+                return None
+
+        out["laser_current"] = _safe(self.laser_read_current)
+        out["laser_voltage"] = _safe(self.laser_read_voltage)
+        out["laser_set_current"] = _safe(self.laser_read_set_current)
+        out["tec_current"] = _safe(self.read_current)
+        out["tec_temp"] = _safe(self.read_temp)
+        out["tec_set_temp"] = _safe(self.read_set_temp)
         try:
-            self.write_command(COMMON["LOCAL"])
-            time.sleep(0.1)
-            return True
+            tec_v = self.query("TEC:V?")
+            out["tec_voltage"] = float(tec_v) if tec_v is not None else None
         except Exception:
-            return False
+            out["tec_voltage"] = None
+        out["actual_current"] = out["laser_current"]
+        out["actual_temp"] = out["tec_temp"]
+        out["max_current"] = _safe(self.laser_read_current_limit)
+        out["max_temp"] = _safe(self.read_THI_limit)
+        lo = _safe(self.laser_read_output)
+        out["laser_on"] = (lo == 1) if lo is not None else None
+        to = _safe(self.read_output)
+        out["tec_on"] = (to == 1) if to is not None else None
+        return out

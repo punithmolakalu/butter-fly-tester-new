@@ -1,0 +1,11 @@
+# Butterfly Tester — Ruff config (optional deps / PyQt use deferred imports on purpose)
+target-version = "py310"
+line-length = 120
+
+[lint]
+# E402: imports after path tweaks or optional pyqtgraph blocks (main.py, liv_process_plot, etc.)
+ignore = ["E402"]
+
+[lint.per-file-ignores]
+# Large GUI module: legacy patterns
+"view/main_window.py" = ["E501"]

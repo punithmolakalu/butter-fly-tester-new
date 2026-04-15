@@ -36,6 +36,7 @@ from instruments.prm import (
 from instruments.thorlabs_powermeter import ThorlabsPowermeterConnection, scan_thorlabs_visa_resources
 from instruments.gentec_powermeter import GentecConnection
 from instruments.instrument_manager import InstrumentManager  # noqa: E402
+from instruments.visa_safe import safe_close_pyvisa_resource, safe_close_pyvisa_resource_manager
 
 # ----- Generic connections (no specific instrument) -----
 class GenericComConnection:
@@ -93,10 +94,7 @@ class GenericGpibConnection:
             return False
         try:
             if self._resource:
-                try:
-                    self._resource.close()
-                except Exception:
-                    pass
+                safe_close_pyvisa_resource(self._resource)
                 self._resource = None
             self._rm = pyvisa.ResourceManager()
             self._resource = self._rm.open_resource(self.gpib_address, open_timeout=5000)
@@ -106,20 +104,19 @@ class GenericGpibConnection:
         except Exception:
             self.connected = False
             if self._resource:
-                try:
-                    self._resource.close()
-                except Exception:
-                    pass
+                safe_close_pyvisa_resource(self._resource)
                 self._resource = None
+            if self._rm:
+                safe_close_pyvisa_resource_manager(self._rm)
+                self._rm = None
             return False
 
     def disconnect(self) -> None:
         if self._resource:
-            try:
-                self._resource.close()
-            except Exception:
-                pass
+            safe_close_pyvisa_resource(self._resource)
         self._resource = None
+        if self._rm:
+            safe_close_pyvisa_resource_manager(self._rm)
         self._rm = None
         self.connected = False
 
@@ -141,10 +138,7 @@ class GenericVisaConnection:
             return False
         try:
             if self._resource:
-                try:
-                    self._resource.close()
-                except Exception:
-                    pass
+                safe_close_pyvisa_resource(self._resource)
                 self._resource = None
             self._rm = pyvisa.ResourceManager()
             self._resource = self._rm.open_resource(self.resource_str, open_timeout=5000)
@@ -154,20 +148,19 @@ class GenericVisaConnection:
         except Exception:
             self.connected = False
             if self._resource:
-                try:
-                    self._resource.close()
-                except Exception:
-                    pass
+                safe_close_pyvisa_resource(self._resource)
                 self._resource = None
+            if self._rm:
+                safe_close_pyvisa_resource_manager(self._rm)
+                self._rm = None
             return False
 
     def disconnect(self) -> None:
         if self._resource:
-            try:
-                self._resource.close()
-            except Exception:
-                pass
+            safe_close_pyvisa_resource(self._resource)
         self._resource = None
+        if self._rm:
+            safe_close_pyvisa_resource_manager(self._rm)
         self._rm = None
         self.connected = False
 
@@ -221,18 +214,24 @@ def scan_visa() -> List[str]:
                     pass
 
         # Default backend (e.g. NI-VISA on Windows)
+        rm = None
         try:
             rm = pyvisa.ResourceManager()
             add_from_rm(rm)
         except Exception:
             pass
+        finally:
+            safe_close_pyvisa_resource_manager(rm)
 
         # pyvisa-py backend (often shows USB devices that NI-VISA misses)
+        rm_py = None
         try:
             rm_py = pyvisa.ResourceManager("@py")
             add_from_rm(rm_py)
         except Exception:
             pass
+        finally:
+            safe_close_pyvisa_resource_manager(rm_py)
 
         return sorted(resources)
     except Exception:

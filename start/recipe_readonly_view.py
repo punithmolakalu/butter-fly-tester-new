@@ -3,7 +3,6 @@ Read-only recipe view: same layout as New Recipe window (RecipeWindow).
 All fields non-editable; layout matches RecipeWindow (GENERAL, PER, LIV, SPECTRUM, TEMP STABILITY).
 Always shows full layout; values empty when no recipe loaded, filled when recipe loaded.
 """
-import json
 
 from operations.recipe_normalize import normalize_loaded_recipe
 from PyQt5.QtWidgets import (
@@ -57,6 +56,17 @@ def _ro_line(parent=None, width=INPUT_WIDTH):
     return le
 
 
+def _ro_line_flex(wmin: int = 52, wmax: int = 120):
+    """Read-only line for tight grids (TEMP STABILITY); caps width so the tab stays responsive."""
+    le = QLineEdit()
+    le.setReadOnly(True)
+    le.setMinimumWidth(wmin)
+    le.setMaximumWidth(wmax)
+    le.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+    le.setStyleSheet("background-color: #2d2d2d; color: #e6e6e6; border: 1px solid #3a3a42; padding: 5px;")
+    return le
+
+
 def _ro_spin(min_val=0, max_val=20, width=60):
     """Read-only small value box (no buttons) for # Tests."""
     sp = QSpinBox()
@@ -102,7 +112,9 @@ class RecipeReadonlyView(QWidget):
         self._build_liv_tab()
         self._build_spectrum_tab()
         self._build_temperature_stability_tab()
-        layout.addWidget(self._tab_widget)
+        self._tab_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self._tab_widget, 1)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAutoFillBackground(True)
         # Scroll area viewports default to light Base on Fusion — force dark so tab does not flash white while scrolling.
         try:
@@ -112,10 +124,11 @@ class RecipeReadonlyView(QWidget):
             for sa in self.findChildren(QScrollArea):
                 sa.setFrameShape(QFrame.NoFrame)
                 vp = sa.viewport()
-                vp.setAutoFillBackground(True)
-                vpal = QPalette()
-                vpal.setColor(QPalette.Window, QColor(30, 30, 35))
-                vp.setPalette(vpal)
+                if vp is not None:
+                    vp.setAutoFillBackground(True)
+                    vpal = QPalette()
+                    vpal.setColor(QPalette.Window, QColor(30, 30, 35))
+                    vp.setPalette(vpal)
         except Exception:
             pass
 
@@ -143,6 +156,17 @@ class RecipeReadonlyView(QWidget):
         comments_row.addWidget(QLabel("COMMENTS:"))
         comments_row.addWidget(self._w("gen.comments", _ro_line(None, 400)))
         rcp_layout.addLayout(comments_row)
+        extra_gen = QHBoxLayout()
+        extra_gen.addWidget(QLabel("Save folder:"))
+        extra_gen.addWidget(self._w("gen.save_path", _ro_line(None, 280)))
+        extra_gen.addSpacing(16)
+        extra_gen.addWidget(QLabel("FP Path:"))
+        extra_gen.addWidget(self._w("gen.fp_path", _ro_line(None, 50)))
+        extra_gen.addSpacing(16)
+        extra_gen.addWidget(QLabel("Laser current (mA):"))
+        extra_gen.addWidget(self._w("gen.laser_current", _ro_line(None, 80)))
+        extra_gen.addStretch()
+        rcp_layout.addLayout(extra_gen)
         # Same row as New Recipe: Test Sequence (left), # Tests (right), Fiber Coupled (right)
         seq_header = QHBoxLayout()
         seq_header.addWidget(QLabel("Test Sequence"))
@@ -157,7 +181,7 @@ class RecipeReadonlyView(QWidget):
         seq_header.addWidget(QLabel("Wavelength (nm):"))
         seq_header.addWidget(self._w("gen.wavelength", _ro_line(None, 80)))
         seq_header.addSpacing(24)
-        seq_header.addWidget(QLabel("SMSR:"))
+        seq_header.addWidget(QLabel("SMSR Correction:"))
         seq_header.addWidget(self._w("gen.smsr", _ro_line(None, 50)))
         seq_header.addStretch()
         rcp_layout.addLayout(seq_header)
@@ -174,18 +198,6 @@ class RecipeReadonlyView(QWidget):
         scroll_area.setWidget(seq_frame)
         rcp_layout.addWidget(scroll_area)
         gl.addWidget(rcp)
-        pfc_box = QGroupBox("PASS_FAIL_CRITERIA (from recipe file)")
-        pfc_box.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
-        pfc_lo = QVBoxLayout(pfc_box)
-        pfc_lo.setContentsMargins(*GROUP_MARGINS)
-        pfc_txt = QPlainTextEdit()
-        pfc_txt.setReadOnly(True)
-        pfc_txt.setMinimumHeight(100)
-        pfc_txt.setMaximumHeight(220)
-        pfc_txt.setPlaceholderText("No PASS_FAIL_CRITERIA block in this recipe.")
-        self._w("gen.pass_fail_json", pfc_txt)
-        pfc_lo.addWidget(pfc_txt)
-        gl.addWidget(pfc_box)
         gl.addStretch()
         self._tab_widget.addTab(tab, "GENERAL")
 
@@ -197,7 +209,7 @@ class RecipeReadonlyView(QWidget):
         outer.setSpacing(12)
         hl = QHBoxLayout()
         hl.setSpacing(15)
-        hl.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        hl.setAlignment(Qt.AlignmentFlag(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft))
         center_widget = QWidget()
         center_layout = QHBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -242,7 +254,7 @@ class RecipeReadonlyView(QWidget):
         hl = QHBoxLayout(tab)
         hl.setContentsMargins(15, 15, 15, 15)
         hl.setSpacing(15)
-        hl.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        hl.setAlignment(Qt.AlignmentFlag(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft))
         left = QWidget()
         left.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         ll = QVBoxLayout(left)
@@ -268,7 +280,7 @@ class RecipeReadonlyView(QWidget):
         mult_row.addWidget(QLabel("Mult Factor:"))
         mult_row.addWidget(self._w("liv.mult", _ro_line()))
         ll.addLayout(mult_row)
-        hl.addWidget(left, 0, Qt.AlignTop)
+        hl.addWidget(left, 0, Qt.AlignmentFlag.AlignTop)
         right = QWidget()
         right.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         rl = QVBoxLayout(right)
@@ -464,40 +476,43 @@ class RecipeReadonlyView(QWidget):
         self._tab_widget.addTab(tab, "SPECTRUM")
 
     def _build_ts_slot_readonly(self, slot: int) -> QWidget:
-        """One TS block: Control | Ando + offsets/deg | Limits + Save PDF (matches RecipeWindow)."""
+        """One TS block: Control, Ando, and Limits on one horizontal row (matches RecipeWindow TEMP STABILITY)."""
         px = "ts{}.".format(slot)
         w = QWidget()
-        vl = QVBoxLayout(w)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(GROUP_SPACING)
-        three = QHBoxLayout()
-        three.setSpacing(12)
+        w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        root = QVBoxLayout(w)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(GROUP_SPACING)
+
+        top_band = QHBoxLayout()
+        top_band.setSpacing(12)
 
         ctrl = QGroupBox("Control Parameters")
         ctrl.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        ctrl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         cg = QGridLayout(ctrl)
         cg.setSpacing(8)
         cg.setContentsMargins(*GROUP_MARGINS)
         r = 0
         cg.addWidget(QLabel("MIN Temp"), r, 0)
-        cg.addWidget(self._w(px + "min_temp", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(self._w(px + "min_temp", _ro_line_flex(56, 140)), r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
         r += 1
         cg.addWidget(QLabel("MAX Temp"), r, 0)
-        cg.addWidget(self._w(px + "max_t", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(self._w(px + "max_t", _ro_line_flex(56, 140)), r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
         r += 1
         cg.addWidget(QLabel("INC"), r, 0)
-        cg.addWidget(self._w(px + "step", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(self._w(px + "step", _ro_line_flex(56, 140)), r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
         r += 1
         cg.addWidget(QLabel("WAIT TIME"), r, 0)
-        cg.addWidget(self._w(px + "wait_ms", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(self._w(px + "wait_ms", _ro_line_flex(56, 140)), r, 1)
         cg.addWidget(QLabel("ms"), r, 2)
         r += 1
         cg.addWidget(QLabel("Set Curr"), r, 0)
         hset = QHBoxLayout()
-        hset.addWidget(self._w(px + "set_curr", _ro_line(INPUT_WIDTH)))
+        hset.addWidget(self._w(px + "set_curr", _ro_line_flex(56, 160)))
         hset.addWidget(QLabel("mA"))
         ur = QCheckBox("Use I@Rated_P")
         ur.setEnabled(False)
@@ -506,47 +521,68 @@ class RecipeReadonlyView(QWidget):
         cg.addLayout(hset, r, 1, 1, 2)
         r += 1
         cg.addWidget(QLabel("Init Temp"), r, 0)
-        cg.addWidget(self._w(px + "initial", _ro_line(INPUT_WIDTH)), r, 1)
+        cg.addWidget(self._w(px + "initial", _ro_line_flex(56, 140)), r, 1)
         cg.addWidget(QLabel("°C"), r, 2)
-        three.addWidget(ctrl, 1)
+        cg.setColumnStretch(1, 1)
+        top_band.addWidget(ctrl, 1)
 
         ando = QGroupBox("Ando Parameters")
         ando.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        ando.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         ag = QGridLayout(ando)
         ag.setSpacing(8)
         ag.setContentsMargins(*GROUP_MARGINS)
         r = 0
         ag.addWidget(QLabel("Span"), r, 0)
-        ag.addWidget(self._w(px + "span_nm", _ro_line(INPUT_WIDTH)), r, 1)
+        ag.addWidget(self._w(px + "span_nm", _ro_line_flex(56, 140)), r, 1)
         ag.addWidget(QLabel("nm"), r, 2)
         r += 1
         ag.addWidget(QLabel("Sampling"), r, 0)
-        ag.addWidget(self._w(px + "smpl", _ro_line(INPUT_WIDTH)), r, 1)
+        ag.addWidget(self._w(px + "smpl", _ro_line_flex(56, 140)), r, 1)
         r += 1
         ccs = QCheckBox("Continuous Scan")
         ccs.setEnabled(False)
         ag.addWidget(self._w(px + "continuous_scan", ccs), r, 0, 1, 3)
+        ag.setColumnStretch(1, 1)
 
         mid_col = QWidget()
+        mid_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         mid_v = QVBoxLayout(mid_col)
         mid_v.setContentsMargins(0, 0, 0, 0)
         mid_v.setSpacing(8)
         mid_v.addWidget(ando)
-        off_row = QHBoxLayout()
-        off_row.setSpacing(10)
-        off_row.addWidget(QLabel("Offset1"))
-        off_row.addWidget(self._w(px + "offset1", _ro_line(INPUT_WIDTH)))
-        off_row.addWidget(QLabel("Offset2"))
-        off_row.addWidget(self._w(px + "offset2", _ro_line(INPUT_WIDTH)))
-        off_row.addSpacing(12)
-        off_row.addWidget(QLabel("Deg of Stability"))
-        off_row.addWidget(self._w(px + "deg_stability", _ro_line(60)))
-        off_row.addStretch()
-        mid_v.addLayout(off_row)
-        three.addWidget(mid_col, 1)
+        off_row1 = QHBoxLayout()
+        off_row1.setSpacing(10)
+        off_row1.addWidget(QLabel("Offset1"))
+        off_row1.addWidget(self._w(px + "offset1", _ro_line_flex(48, 120)))
+        off_row1.addWidget(QLabel("Offset2"))
+        off_row1.addWidget(self._w(px + "offset2", _ro_line_flex(48, 120)))
+        off_row1.addStretch()
+        mid_v.addLayout(off_row1)
+        off_row2 = QHBoxLayout()
+        off_row2.setSpacing(10)
+        off_row2.addWidget(QLabel("Deg of Stability"))
+        off_row2.addWidget(self._w(px + "deg_stability", _ro_line_flex(44, 88)))
+        off_row2.addStretch()
+        mid_v.addLayout(off_row2)
+        rec_row1 = QHBoxLayout()
+        rec_row1.setSpacing(10)
+        rec_row1.addWidget(QLabel("Min stability span"))
+        rec_row1.addWidget(self._w(px + "recovery_step", _ro_line_flex(56, 140)))
+        rec_row1.addWidget(QLabel("°C"))
+        rec_row1.addStretch()
+        mid_v.addLayout(rec_row1)
+        rec_row2 = QHBoxLayout()
+        rec_row2.setSpacing(10)
+        rec_row2.addWidget(QLabel("Recovery steps"))
+        rec_row2.addWidget(self._w(px + "recovery_steps_count", _ro_line_flex(44, 72)))
+        rec_row2.addStretch()
+        mid_v.addLayout(rec_row2)
+        top_band.addWidget(mid_col, 1)
 
         lim = QGroupBox("Limits")
         lim.setStyleSheet("QGroupBox { font-weight: bold; color: #e6e6e6; }")
+        lim.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         lg = QGridLayout(lim)
         lg.setSpacing(6)
         lg.setContentsMargins(*GROUP_MARGINS)
@@ -555,35 +591,49 @@ class RecipeReadonlyView(QWidget):
             lb = QLabel(lab)
             lb.setStyleSheet("font-weight: bold;")
             lg.addWidget(lb, 0, c)
-        for ri, name in enumerate(("FWHM", "SMSR", "Width1", "Width2", "WL", "Power"), start=1):
-            lg.addWidget(QLabel(name), ri, 0)
-            lg.addWidget(self._w(px + "lim_" + name + "_ll", _ro_line(72)), ri, 1)
+        for ri, name in enumerate(("FWHM", "SMSR", "Width1", "Width2", "WL", "Power", "Thorlabs"), start=1):
+            nm = QLabel(name)
+            nm.setWordWrap(False)
+            lg.addWidget(nm, ri, 0)
+            lg.addWidget(self._w(px + "lim_" + name + "_ll", _ro_line_flex(48, 100)), ri, 1)
             if name == "Power":
                 lg.addWidget(QLabel("—"), ri, 2)
             else:
-                lg.addWidget(self._w(px + "lim_" + name + "_ul", _ro_line(72)), ri, 2)
+                lg.addWidget(self._w(px + "lim_" + name + "_ul", _ro_line_flex(48, 100)), ri, 2)
             lg.addWidget(self._w(px + "lim_" + name + "_en", _ro_check()), ri, 3)
-        three.addWidget(lim, 1)
-        vl.addLayout(three)
+        lg.setColumnStretch(1, 1)
+        lg.setColumnStretch(2, 1)
+        lim.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        top_band.addWidget(lim, 1)
 
-        foot = QHBoxLayout()
+        root.addLayout(top_band)
+
+        foot = QVBoxLayout()
+        foot.setSpacing(6)
         spdf = QCheckBox("Save PDF")
         spdf.setEnabled(False)
         foot.addWidget(self._w(px + "save_pdf", spdf))
-        foot.addStretch()
-        vl.addLayout(foot)
+        rq = QCheckBox("Require Thorlabs")
+        rq.setEnabled(False)
+        rq.setToolTip("When checked, fail if Thorlabs powermeter is not connected (ThorlabsRequired).")
+        foot.addWidget(self._w(px + "require_thorlabs", rq))
+        root.addLayout(foot)
         return w
 
     def _build_temperature_stability_tab(self):
         """Read-only mirror of RecipeWindow TEMP STABILITY (TS1 / TS2 OPERATIONS blocks)."""
         tab = QWidget()
         tab.setStyleSheet(RO_STYLE)
+        tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(5, 5, 5, 5)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         inner = QWidget()
+        inner.setMinimumWidth(0)
+        inner.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         vl = QVBoxLayout(inner)
         vl.setContentsMargins(8, 8, 8, 8)
         vl.setSpacing(16)
@@ -594,34 +644,42 @@ class RecipeReadonlyView(QWidget):
         t2 = QLabel("Temperature Stability 2")
         t2.setStyleSheet("font-weight: bold; font-size: 14px; color: #e6e6e6;")
         vl.addWidget(t2)
-        row2 = QHBoxLayout()
-        row2.setSpacing(12)
-        row2.addWidget(self._build_ts_slot_readonly(2), 1)
+        col2 = QVBoxLayout()
+        col2.setSpacing(8)
+        col2.addWidget(self._build_ts_slot_readonly(2), 0)
         note = QLabel("Temperature Stability 2 will only run if Temperature Stability 1 passes.")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #CCCCCC; font-size: 12px; max-width: 220px;")
-        note.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        row2.addWidget(note, 0)
+        note.setStyleSheet("color: #CCCCCC; font-size: 12px;")
+        note.setAlignment(Qt.AlignmentFlag(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft))
+        note.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        col2.addWidget(note, 0)
         wrap = QWidget()
-        wrap.setLayout(row2)
+        wrap.setLayout(col2)
+        wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         vl.addWidget(wrap)
         vl.addStretch()
         scroll.setWidget(inner)
-        outer.addWidget(scroll)
+        outer.addWidget(scroll, 1)
         self._tab_widget.addTab(tab, "TEMP STABILITY")
 
     def _clear_seq_layout(self):
         """Remove all rows from the test sequence area (GENERAL tab)."""
         while self._seq_layout.count():
             item = self._seq_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+            else:
                 lay = item.layout()
-                while lay.count():
-                    sub = lay.takeAt(0)
-                    if sub.widget():
-                        sub.widget().deleteLater()
+                if lay is not None:
+                    while lay.count():
+                        sub = lay.takeAt(0)
+                        if sub is not None:
+                            sw = sub.widget()
+                            if sw is not None:
+                                sw.deleteLater()
 
     def _set(self, key, value):
         w = self._widgets.get(key)
@@ -662,11 +720,13 @@ class RecipeReadonlyView(QWidget):
         if not data:
             self.clear()
             return
-        if isinstance(data, dict):
-            try:
-                normalize_loaded_recipe(data)
-            except Exception:
-                pass
+        if not isinstance(data, dict):
+            self.clear()
+            return
+        try:
+            normalize_loaded_recipe(data)
+        except Exception:
+            pass
         def get(d, *keys, default=""):
             for k in keys:
                 if isinstance(d, dict) and k in d:
@@ -678,7 +738,8 @@ class RecipeReadonlyView(QWidget):
             return get(data, *path) if isinstance(data, dict) else {}
 
         gen = section("GENERAL") or section("General") or {}
-        ops = data.get("OPERATIONS") or data.get("operations") or {}
+        _ops_raw = data.get("OPERATIONS") or data.get("operations")
+        ops = _ops_raw if isinstance(_ops_raw, dict) else {}
         liv = section("LIV") or get(ops, "LIV") or {}
         per = section("PER") or get(ops, "PER") or {}
         spec = section("SPECTRUM") or get(ops, "SPECTRUM") or {}
@@ -715,18 +776,34 @@ class RecipeReadonlyView(QWidget):
         if wl_top is None or wl_top == "":
             wl_top = gen.get("Wavelength")
         self._set("gen.wavelength", str(wl_top).strip() if wl_top not in (None, "") else "")
+        self._set("gen.save_path", str(get(gen, "SavePath") or get(gen, "save_path") or "").strip())
+        fpv = gen.get("FPPath")
+        if fpv is None:
+            fpv = gen.get("fp_path")
+        if isinstance(fpv, bool):
+            self._set("gen.fp_path", "Yes" if fpv else "No")
+        else:
+            self._set("gen.fp_path", str(fpv).strip() if fpv not in (None, "") else "")
+        cur_top = data.get("Current")
+        if cur_top is None or cur_top == "":
+            cur_top = gen.get("Current")
+        self._set("gen.laser_current", str(cur_top).strip() if cur_top not in (None, "") else "")
         wm_for_gen = get(data, "spec", "WAVEMETER") or get(ops, "WAVEMETER") or get(data, "WAVEMETER") or {}
         if not isinstance(wm_for_gen, dict):
             wm_for_gen = {}
-        self._set("gen.smsr", "Yes" if wm_for_gen.get("smsr") else "No")
+        smsr_corr_any = bool(wm_for_gen.get("smsr"))
+        for _slot in (1, 2):
+            _key = "Temperature Stability {}".format(_slot)
+            _ts = ops.get(_key) if isinstance(ops.get(_key), dict) else {}
+            if isinstance(_ts, dict):
+                smsr_corr_any = smsr_corr_any or bool(
+                    _ts.get(
+                        "SMSR_correction_enable",
+                        _ts.get("EnableSMSR_correction", _ts.get("smsr_correction_enable", False)),
+                    )
+                )
+        self._set("gen.smsr", "Yes" if smsr_corr_any else "No")
         pfc_all = data.get("PASS_FAIL_CRITERIA") or data.get("PassFailCriteria") or {}
-        if isinstance(pfc_all, dict) and pfc_all:
-            try:
-                self._set("gen.pass_fail_json", json.dumps(pfc_all, indent=2, ensure_ascii=False))
-            except Exception:
-                self._set("gen.pass_fail_json", str(pfc_all))
-        else:
-            self._set("gen.pass_fail_json", "")
         self._clear_seq_layout()
         for i, name in enumerate(seq):
             row = QHBoxLayout()
@@ -799,10 +876,12 @@ class RecipeReadonlyView(QWidget):
             pfc = data.get("PASS_FAIL_CRITERIA") or data.get("PassFailCriteria") or {}
             if isinstance(pfc, dict):
                 pf_spec = pfc.get("SPECTRUM") or pfc.get("Spectrum") or {}
-        lim_src = spec.get("limits") if isinstance(spec, dict) and isinstance(spec.get("limits"), dict) else {}
+        _spec_lim_raw = spec.get("limits") if isinstance(spec, dict) else None
+        lim_src = _spec_lim_raw if isinstance(_spec_lim_raw, dict) else {}
         for param in ["Peak WL", "FWHM", "Cen WL", "SMSR"]:
             pk = param.replace(" ", "").lower()
-            sub = lim_src.get(param) or lim_src.get(pk) or {}
+            _sub_raw = lim_src.get(param) or lim_src.get(pk)
+            sub = _sub_raw if isinstance(_sub_raw, dict) else {}
             if isinstance(sub, dict):
                 ll, ul, en = sub.get("ll"), sub.get("ul"), sub.get("enable")
             else:
@@ -825,11 +904,12 @@ class RecipeReadonlyView(QWidget):
         self._set("wm.resolution", get(wm, "resolution"))
         self._set("wm.sample_mode", get(wm, "sample_mode"))
         self._set("wm.avg", get(wm, "averaging"))
-        self._set("wm.smsr", "Yes" if wm.get("smsr") else "No")
+        self._set("wm.smsr", "Yes" if (isinstance(wm, dict) and wm.get("smsr")) else "No")
 
         for slot in (1, 2):
             key = "Temperature Stability {}".format(slot)
-            ts = ops.get(key) if isinstance(ops.get(key), dict) else {}
+            _ts_raw = ops.get(key)
+            ts = _ts_raw if isinstance(_ts_raw, dict) else {}
             px = "ts{}.".format(slot)
             self._set(px + "min_temp", ts.get("MinTemp", ts.get("min_temp_c", ts.get("MINTemp", ""))))
             self._set(px + "max_t", ts.get("MaxTemperature", ts.get("max_temp_c", "")))
@@ -845,20 +925,60 @@ class RecipeReadonlyView(QWidget):
             self._set(px + "offset2", ts.get("Offset2_nm", ts.get("offset2", "")))
             self._set(px + "save_pdf", ts.get("SavePDF", ts.get("save_pdf", False)))
             self._set(px + "deg_stability", ts.get("DegOfStability", ts.get("deg_of_stability", "")))
-            lim_src = ts.get("limits") if isinstance(ts.get("limits"), dict) else {}
-            for name in ("FWHM", "SMSR", "Width1", "Width2", "WL", "Power"):
-                sub = lim_src.get(name) if isinstance(lim_src.get(name), dict) else {}
+            self._set(
+                px + "recovery_step",
+                ts.get("RecoveryStep_C", ts.get("recovery_step_C", ts.get("MinStabilitySpanAfterExceed_C", ""))),
+            )
+            self._set(px + "recovery_steps_count", ts.get("RecoverySteps", ts.get("recovery_steps", "")))
+            self._set(px + "require_thorlabs", ts.get("ThorlabsRequired", ts.get("thorlabs_required", False)))
+            _ts_lim_raw = ts.get("limits")
+            lim_src = _ts_lim_raw if isinstance(_ts_lim_raw, dict) else {}
+            for name in ("FWHM", "SMSR", "Width1", "Width2", "WL", "Power", "Thorlabs"):
+                _sub_raw = lim_src.get(name)
+                sub = _sub_raw if isinstance(_sub_raw, dict) else {}
                 self._set(px + "lim_" + name + "_ll", sub.get("ll", sub.get("LL", "")))
                 if name != "Power":
                     self._set(px + "lim_" + name + "_ul", sub.get("ul", sub.get("UL", "")))
                 self._set(px + "lim_" + name + "_en", sub.get("enable", sub.get("Enable", False)))
 
-        # LIV pass/fail grid: fill from OPERATIONS.LIV.limits when present (widget keys match _build_liv_tab).
-        liv_lim = liv.get("limits") if isinstance(liv, dict) and isinstance(liv.get("limits"), dict) else {}
+        # LIV pass/fail grid: RecipeWindow saves under PASS_FAIL_CRITERIA.LIV (same keys as editor); legacy OPERATIONS.LIV.limits + flat keys.
+        _liv_lim_raw = liv.get("limits") if isinstance(liv, dict) else None
+        liv_lim = _liv_lim_raw if isinstance(_liv_lim_raw, dict) else {}
+        liv_pf: dict = {}
+        if isinstance(pfc_all, dict):
+            _lpf_raw = pfc_all.get("LIV")
+            liv_pf = _lpf_raw if isinstance(_lpf_raw, dict) else {}
+        legacy_flat = {
+            "IT": ("min_threshold_mA", "max_threshold_mA"),
+            "SE1": ("min_slope_efficiency", "max_slope_efficiency"),
+            "L @ Ir": ("min_power_at_rated_mW", "max_power_at_rated_mW"),
+            "I @ Lr": ("min_current_at_rated_mA", "max_current_at_rated_mA"),
+            "V @ Ir": ("min_voltage_at_Ir_V", "max_voltage_at_Ir_V"),
+            "V @ Lr": ("min_voltage_at_Lr_V", "max_voltage_at_Lr_V"),
+            "PD @ Ir": ("min_pd_at_Ir", "max_pd_at_Ir"),
+        }
         for param in ["L @ Ir", "V @ Ir", "I @ Lr", "V @ Lr", "SE1", "IT", "PD @ Ir"]:
             wkey = "liv.crit_" + param.replace(" ", "").replace("@", "") + "_"
-            sub = liv_lim.get(param) or liv_lim.get(param.replace(" ", "")) or {}
+            sub: dict = {}
+            _pf_raw = liv_pf.get(param)
+            if isinstance(_pf_raw, dict) and _pf_raw:
+                sub = dict(_pf_raw)
+            if not sub:
+                _ll_raw = liv_lim.get(param)
+                sub = _ll_raw if isinstance(_ll_raw, dict) else {}
+            if not sub:
+                _ll_raw2 = liv_lim.get(param.replace(" ", ""))
+                sub = _ll_raw2 if isinstance(_ll_raw2, dict) else {}
+            if not sub and param in legacy_flat:
+                kmin, kmax = legacy_flat[param]
+                if kmin in liv_pf or kmax in liv_pf:
+                    sub = {
+                        "ll": liv_pf.get(kmin, ""),
+                        "ul": liv_pf.get(kmax, ""),
+                        "enable": True,
+                    }
             if isinstance(sub, dict):
-                self._set(wkey + "ll", sub.get("ll", sub.get("lower", "")))
-                self._set(wkey + "ul", sub.get("ul", sub.get("upper", "")))
-                self._set(wkey + "en", sub.get("enable", sub.get("en", "")))
+                self._set(wkey + "ll", sub.get("ll", sub.get("LL", sub.get("lower", ""))))
+                self._set(wkey + "ul", sub.get("ul", sub.get("UL", sub.get("upper", ""))))
+                en = sub.get("enable", sub.get("Enable", sub.get("en", "")))
+                self._set(wkey + "en", en if en not in (None, "") else "")

@@ -22,6 +22,24 @@ from PyQt5.QtGui import QShowEvent
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar, spinbox_arrow_styles
 
 
+def _mw_numeric_from_payload(payload):
+    """None, float, or (mW, _) tuple from Gentec/Thorlabs workers — same convention as MainWindow._gentec_mw_from_payload."""
+    if payload is None:
+        return None
+    if isinstance(payload, (tuple, list)) and len(payload) >= 1:
+        v = payload[0]
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return float(payload)
+    except (TypeError, ValueError):
+        return None
+
+
 class AlignmentWindow(QMainWindow):
     """Alignment window: Laser details from main GUI only; setting changes go to Arroyo. ANDO SETTINGS tab. OK/Cancel emit for LIV flow."""
 
@@ -33,9 +51,18 @@ class AlignmentWindow(QMainWindow):
         self._main = main_window
         self._arroyo_laser_on = False
         self._arroyo_tec_on = False
+        self._liv_ok_close_delay_ms = 0
+        self._liv_require_laser_before_ando = False
         self._meter_refresh_timer = QTimer(self)
         self._meter_refresh_timer.setInterval(500)
         self._meter_refresh_timer.timeout.connect(self._refresh_meter_readings)
+        # Child timers: cancelled when the window closes (avoids QTimer.singleShot firing after C++ delete).
+        self._liv_ok_timer = QTimer(self)
+        self._liv_ok_timer.setSingleShot(True)
+        self._liv_ok_timer.timeout.connect(self._deliver_alignment_confirmed_and_close)
+        self._liv_ando_fallback_timer = QTimer(self)
+        self._liv_ando_fallback_timer.setSingleShot(True)
+        self._liv_ando_fallback_timer.timeout.connect(self._liv_ando_after_laser_timeout)
         self.setWindowTitle("Alignment")
         self.setMinimumSize(560, 420)
         self.resize(680, 460)
@@ -72,6 +99,15 @@ class AlignmentWindow(QMainWindow):
             self._meter_refresh_timer.stop()
         except Exception:
             pass
+        for _tname in ("_liv_ok_timer", "_liv_ando_fallback_timer"):
+            _t = getattr(self, _tname, None)
+            if _t is not None:
+                try:
+                    _t.stop()
+                except Exception:
+                    pass
+        self._liv_waiting_ando_after_laser = False
+        self._disconnect_liv_ando_arroyo_slot()
         super().closeEvent(event)
 
     def set_wavelength_from_recipe(self, value):
@@ -453,17 +489,19 @@ class AlignmentWindow(QMainWindow):
             self._align_laser_btn.setStyleSheet(btn_style_off)
             self._align_laser_btn.setChecked(False)
 
-    def _on_gentec_reading_updated(self, value_mw):
-        if value_mw is None:
+    def _on_gentec_reading_updated(self, payload):
+        mw = _mw_numeric_from_payload(payload)
+        if mw is None:
             self._align_gentec_reading.setText("—")
         else:
-            self._align_gentec_reading.setText(f"{value_mw:.4f}")
+            self._align_gentec_reading.setText(f"{mw:.4f}")
 
-    def _on_thorlabs_reading_updated(self, value_mw):
-        if value_mw is None:
+    def _on_thorlabs_reading_updated(self, payload):
+        mw = _mw_numeric_from_payload(payload)
+        if mw is None:
             self._align_thorlabs_reading.setText("—")
         else:
-            self._align_thorlabs_reading.setText(f"{value_mw:.4f}")
+            self._align_thorlabs_reading.setText(f"{mw:.4f}")
 
     def _on_align_wavelength(self):
         vm = self._vm()
@@ -490,15 +528,38 @@ class AlignmentWindow(QMainWindow):
         if vm and hasattr(vm, "set_arroyo_laser_current_limit"):
             vm.set_arroyo_laser_current_limit(self._align_max_current.value())
 
-    def set_liv_recipe_params(self, min_current: float, max_current: float, temperature: float):
-        """Apply LIV recipe values to alignment window: Set Current = min_current, Set Temperature = temperature, Max Current = max_current; then send to Arroyo."""
-        self._align_set_current.setValue(min_current)
+    def set_laser_state_from_main(self, laser_on: bool, tec_on: bool) -> None:
+        """Mirror Main tab laser/TEC when the last Arroyo snapshot omitted laser_on/tec_on (e.g. poll paused)."""
+        self._arroyo_laser_on = bool(laser_on)
+        self._arroyo_tec_on = bool(tec_on)
+        self._update_laser_btn_ui()
+
+    def set_liv_sequence_options(
+        self, require_laser_before_ando: bool = False, close_delay_ms_on_ok: int = 0
+    ) -> None:
+        """LIV-only hints from MainWindow (OK delay defers alignment_confirmed until user can observe Ando)."""
+        self._liv_require_laser_before_ando = bool(require_laser_before_ando)
+        try:
+            self._liv_ok_close_delay_ms = int(close_delay_ms_on_ok)
+        except (TypeError, ValueError):
+            self._liv_ok_close_delay_ms = 0
+
+    def set_liv_recipe_params(
+        self, min_current: float, max_current: float, temperature: float, fiber_coupled: bool = False
+    ):
+        """
+        Apply LIV recipe to alignment: Set Temperature = temperature, Max Current = max_current.
+        Set Current = max_current when fiber_coupled (LIV Thorlabs path); otherwise Set Current = min_current (free-space).
+        Then send to Arroyo.
+        """
+        set_i = float(max_current) if fiber_coupled else float(min_current)
+        self._align_set_current.setValue(set_i)
         self._align_set_temp.setValue(temperature)
         self._align_max_current.setValue(max_current)
         vm = self._vm()
         if vm:
             if hasattr(vm, "set_arroyo_laser_current"):
-                vm.set_arroyo_laser_current(min_current)
+                vm.set_arroyo_laser_current(set_i)
             if hasattr(vm, "set_arroyo_temp"):
                 vm.set_arroyo_temp(temperature)
             if hasattr(vm, "set_arroyo_laser_current_limit"):
@@ -572,31 +633,107 @@ class AlignmentWindow(QMainWindow):
             self._align_ando_btn.setStyleSheet("QPushButton { background-color: #4caf50; color: white; font-weight: bold; }")
             self._align_ando_btn.setChecked(True)
 
-    def _liv_auto_laser_on_only(self) -> None:
+    def _liv_auto_laser_on_only(self) -> bool:
         """
         LIV alignment auto-sequence: command laser ON only (never toggle OFF).
 
         Do not call _on_align_laser_clicked() here: if _arroyo_laser_on is stale True
         (e.g. polling paused while LIV turned the laser off), the click handler would
         turn the laser OFF, then ANDO would run — wrong order and unsafe.
+
+        Returns True if the laser ON command was sent to the viewmodel.
         """
         vm = self._vm()
         if not vm or not hasattr(vm, "set_arroyo_laser_output"):
-            return
+            return False
         if hasattr(vm, "is_arroyo_connected") and not vm.is_arroyo_connected():
             QMessageBox.warning(
                 self,
                 "Arroyo not connected",
                 "Connect Arroyo in the Connection tab before turning the laser ON.",
             )
-            return
+            return False
         vm.set_arroyo_laser_output(True)
+        return True
+
+    def _liv_reset_ando_button_visual_off(self) -> None:
+        """LIV auto-sequence: grey ANDO ON until laser readback, without toggling the laser."""
+        if not hasattr(self, "_align_ando_btn"):
+            return
+        btn_style_off = (
+            "QPushButton { background-color: #2d2d34; color: #e6e6e6; font-weight: bold; } "
+            "QPushButton:hover { background-color: #3a3a42; }"
+        )
+        vm = self._vm()
+        if vm and hasattr(vm, "set_ando_sweep_stop"):
+            vm.set_ando_sweep_stop()
+        self._align_ando_btn.blockSignals(True)
+        self._align_ando_btn.setChecked(False)
+        self._align_ando_btn.setText("ANDO ON")
+        self._align_ando_btn.setStyleSheet(btn_style_off)
+        self._align_ando_btn.blockSignals(False)
+
+    def _disconnect_liv_ando_arroyo_slot(self) -> None:
+        vm = self._vm()
+        if vm is not None and hasattr(vm, "arroyo_readings_updated"):
+            try:
+                vm.arroyo_readings_updated.disconnect(self._on_arroyo_reading_for_liv_ando)
+            except (TypeError, RuntimeError):
+                pass
+        ex = getattr(self._main, "_test_sequence_executor", None)
+        if ex is not None:
+            sig = getattr(ex, "liv_live_arroyo", None)
+            if sig is not None:
+                try:
+                    sig.disconnect(self._on_arroyo_reading_for_liv_ando)
+                except (TypeError, RuntimeError):
+                    pass
+
+    def _on_arroyo_reading_for_liv_ando(self, data: dict) -> None:
+        """After LIV alignment laser command: turn ANDO on only when readback confirms laser is on."""
+        if not getattr(self, "_liv_waiting_ando_after_laser", False):
+            return
+        if not isinstance(data, dict):
+            return
+        if not bool(data.get("laser_on")):
+            return
+        self._liv_waiting_ando_after_laser = False
+        self._disconnect_liv_ando_arroyo_slot()
+        QTimer.singleShot(0, self.apply_ando_on_to_instrument)
+
+    def _liv_ando_after_laser_timeout(self) -> None:
+        """If laser readback never confirms, still start ANDO so the user is not stuck."""
+        if not getattr(self, "_liv_waiting_ando_after_laser", False):
+            return
+        self._liv_waiting_ando_after_laser = False
+        self._disconnect_liv_ando_arroyo_slot()
+        self.apply_ando_on_to_instrument()
 
     def start_liv_alignment_auto(self):
-        """For LIV flow: LASER ON first, then ANDO ON (same order as the two buttons, left to right)."""
-        self._liv_auto_laser_on_only()
-        # Let TEC/laser worker settle before starting OSA sweep (was racing ANDO before laser).
-        QTimer.singleShot(550, self.apply_ando_on_to_instrument)
+        """LIV alignment: command LASER ON first (UI + hardware), then ANDO only after laser_on readback (VM worker or LIV live snap) or 8 s fallback."""
+        self._liv_waiting_ando_after_laser = True
+        self._disconnect_liv_ando_arroyo_slot()
+        self._liv_reset_ando_button_visual_off()
+        if not self._liv_auto_laser_on_only():
+            self._liv_waiting_ando_after_laser = False
+            self._disconnect_liv_ando_arroyo_slot()
+            return
+        # Poll is often paused during LIV — show laser ON immediately after command; readback may correct.
+        self._arroyo_laser_on = True
+        self._update_laser_btn_ui()
+        vm = self._vm()
+        if vm is not None and hasattr(vm, "arroyo_readings_updated"):
+            vm.arroyo_readings_updated.connect(self._on_arroyo_reading_for_liv_ando, Qt.QueuedConnection)
+        ex = getattr(self._main, "_test_sequence_executor", None)
+        if ex is not None:
+            sig = getattr(ex, "liv_live_arroyo", None)
+            if sig is not None and hasattr(sig, "connect"):
+                sig.connect(self._on_arroyo_reading_for_liv_ando, Qt.QueuedConnection)
+        if vm is not None and hasattr(vm, "refresh_arroyo_readings"):
+            vm.refresh_arroyo_readings()
+            QTimer.singleShot(250, vm.refresh_arroyo_readings)
+        self._liv_ando_fallback_timer.stop()
+        self._liv_ando_fallback_timer.start(8000)
 
     def _ando_start_repeat(self):
         """Send repeat command (RPT) to Ando to start sweep (called after parameters are sent)."""
@@ -604,13 +741,42 @@ class AlignmentWindow(QMainWindow):
         if vm and hasattr(vm, "set_ando_sweep_repeat"):
             vm.set_ando_sweep_repeat()
 
+    @staticmethod
+    def _qt_object_deleted(obj) -> bool:
+        try:
+            from PyQt5 import sip
+
+            return bool(sip.isdeleted(obj))
+        except Exception:
+            return False
+
+    def _deliver_alignment_confirmed_and_close(self) -> None:
+        """Emit alignment_confirmed then close; safe if the window was already destroyed."""
+        if self._qt_object_deleted(self):
+            return
+        try:
+            self.alignment_confirmed.emit()
+        except RuntimeError:
+            return
+        if self._qt_object_deleted(self):
+            return
+        try:
+            self.close()
+        except RuntimeError:
+            pass
+
     def _on_ok_clicked(self):
         # Stop Ando sweep (STP) before leaving alignment so instrument is in known state
         vm = self._vm()
         if vm and hasattr(vm, "set_ando_sweep_stop"):
             vm.set_ando_sweep_stop()
-        self.alignment_confirmed.emit()
-        self.close()
+
+        self._liv_ok_timer.stop()
+        delay = int(getattr(self, "_liv_ok_close_delay_ms", 0) or 0)
+        if delay > 0:
+            self._liv_ok_timer.start(max(1, delay))
+        else:
+            self._deliver_alignment_confirmed_and_close()
 
     def _on_cancel_clicked(self):
         # Keep instrument state safe if user closes alignment without OK.

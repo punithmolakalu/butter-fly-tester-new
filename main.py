@@ -1,26 +1,143 @@
 """Butterfly Tester — MVVM + PyQt5."""
+import logging
+import os
 import sys
+import threading
+import traceback
 import warnings
 
 # Suppress PyVISA resource-discovery warnings (TCPIP/psutil/zeroconf); connection code unchanged
 warnings.filterwarnings("ignore", category=UserWarning, module="pyvisa_py.tcpip")
+try:
+    from pyvisa.errors import VisaIOWarning
 
-from PyQt5.QtCore import Qt, QTimer
+    warnings.filterwarnings("ignore", category=VisaIOWarning)
+except Exception:
+    pass
+
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
-from view.dark_theme import PYQTGRAPH_PLOT_BACKGROUND, get_dark_palette
+from view.dark_theme import apply_application_theme, is_dark_theme_saved
 from view.main_window import MainWindow
 from viewmodel.main_viewmodel import MainViewModel
 
-# Applied before MainWindow exists so the first frame is not plain white (Windows default).
-# Do not use a bare "QWidget { background: ... }" here — QPushButton is a QWidget and that rule
-# flattens all buttons to the same gray and overrides QPushButton#btn_run / #btn_stop (semantic colors).
-_APP_SHELL_STYLESHEET = """
-QMainWindow { background-color: #1e1e23; color: #e6e6e6; }
-QWidget#main_content { background-color: #1e1e23; }
-QTabWidget::pane { background-color: #1e1e23; border: 1px solid #3a3a42; }
-QStackedWidget { background-color: #1e1e23; }
-QScrollArea { background-color: #1e1e23; border: 1px solid #3a3a42; }
-"""
+class _PyVisaStaleSessionCloseFilter(logging.Filter):
+    """
+    PyVISA logs WARNING + traceback when Resource.close() runs after the VISA session is already
+    invalid (cable unplugged, NI-VISA already tore down the handle). The exception is suppressed
+    inside pyvisa; only the log line is noisy — drop it so stderr matches real failures.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not str(record.name).startswith("pyvisa"):
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            msg = str(getattr(record, "msg", ""))
+        if "Exception suppressed while closing a resource" in msg:
+            return False
+        if "Exception suppressed while destroying a resource" in msg:
+            return False
+        if "InvalidSession" in msg:
+            return False
+        if "VI_ERROR_INV_OBJECT" in msg:
+            return False
+        return True
+
+
+def _configure_terminal_logging() -> None:
+    """Send Python log records to stderr. Set BF_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR (default INFO)."""
+    env = (os.environ.get("BF_LOG_LEVEL") or "INFO").strip().upper()
+    mapping = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "WARN": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
+    level = mapping.get(env, logging.INFO)
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        logging.basicConfig(level=level, format=fmt, datefmt=datefmt, stream=sys.stderr, force=True)
+    except TypeError:
+        root = logging.getLogger()
+        root.handlers.clear()
+        logging.basicConfig(level=level, format=fmt, datefmt=datefmt, stream=sys.stderr)
+    logging.captureWarnings(True)
+    _pv_filt = _PyVisaStaleSessionCloseFilter()
+    logging.getLogger("pyvisa").addFilter(_pv_filt)
+    logging.getLogger("pyvisa.resources").addFilter(_pv_filt)
+
+
+def _install_excepthooks() -> None:
+    """Log uncaught exceptions in the main thread and in worker threads (Python 3.8+)."""
+
+    def _main_excepthook(exc_type, exc_value, exc_tb):
+        if exc_type is KeyboardInterrupt:
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        logging.getLogger("bf.uncaught").critical("Uncaught exception in main thread (traceback below)")
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+
+    sys.excepthook = _main_excepthook
+
+    if hasattr(threading, "excepthook"):
+        def _thread_excepthook(args):  # type: ignore[no-untyped-def]
+            logging.getLogger("bf.thread").error(
+                "Uncaught exception in thread %r (traceback below)",
+                getattr(args.thread, "name", "?"),
+            )
+            traceback.print_exception(
+                args.exc_type, args.exc_value, args.exc_traceback, file=sys.stderr
+            )
+
+        threading.excepthook = _thread_excepthook  # type: ignore[attr-defined]
+
+
+def _install_qt_message_handler() -> None:
+    """Forward Qt qWarning/qCritical (and optional debug) to stderr via logging."""
+    try:
+        from PyQt5.QtCore import QtMsgType, qInstallMessageHandler
+
+        def _qt_handler(mode, context, message):  # noqa: ARG001
+            msg = str(message).strip()
+            if not msg:
+                return
+            lg = logging.getLogger("qt")
+            if mode == QtMsgType.QtFatalMsg:
+                lg.critical("%s", msg)
+            elif mode == QtMsgType.QtCriticalMsg:
+                lg.error("%s", msg)
+            elif mode == QtMsgType.QtWarningMsg:
+                lg.warning("%s", msg)
+            elif mode == QtMsgType.QtDebugMsg:
+                lg.debug("%s", msg)
+            else:
+                lg.info("%s", msg)
+
+        qInstallMessageHandler(_qt_handler)
+    except Exception as exc:
+        logging.getLogger("bf").debug("Qt message handler not installed: %s", exc)
+
+
+def _mirror_connection_logs_to_terminal(viewmodel: MainViewModel) -> None:
+    """Duplicate status-log lines to the terminal (same text as the Main tab log).
+
+    Full ``connection_state`` dicts are DEBUG-only so the default INFO level stays quiet
+    during Connect All; set BF_LOG_LEVEL=DEBUG to trace state snapshots.
+    """
+    lg = logging.getLogger("bf.connection")
+
+    def _on_status(msg: str) -> None:
+        lg.info("%s", msg)
+
+    def _on_state(state: dict) -> None:
+        lg.debug("connection_state: %s", state)
+
+    viewmodel.status_log_message.connect(_on_status)
+    viewmodel.connection_state_changed.connect(_on_state)
 
 
 def _set_pre_app_attributes() -> None:
@@ -53,26 +170,28 @@ def _run_event_loop(app: QApplication) -> int:
 
 
 def main() -> int:
+    _configure_terminal_logging()
+    _install_excepthooks()
     _set_pre_app_attributes()
     app = QApplication(sys.argv)
+    _install_qt_message_handler()
     app.setApplicationName("Butterfly Tester")
     app.setApplicationDisplayName("Butterfly Tester")
     app.setStyle("Fusion")
-    app.setPalette(get_dark_palette())
-    app.setStyleSheet(_APP_SHELL_STYLESHEET)
+    _startup_dark = is_dark_theme_saved()
+    apply_application_theme(app, _startup_dark)
 
     try:
         import pyqtgraph as pg
 
         pg.setConfigOptions(antialias=True)
-        pg.setConfigOption("background", PYQTGRAPH_PLOT_BACKGROUND)
-        pg.setConfigOption("foreground", "w")
     except Exception:
         pass
 
-    # ViewModel starts worker QThreads (non-blocking emits). Heavy UI + COM/GPIB scan + auto-connect
-    # are deferred in MainWindow._complete_heavy_startup so the window can paint first.
+    # ViewModel starts worker QThreads (non-blocking emits). Heavy UI + saved addresses + auto-connect
+    # run in MainWindow._complete_heavy_startup right after the first paint (processEvents).
     viewmodel = MainViewModel()
+    _mirror_connection_logs_to_terminal(viewmodel)
     # Ensure all instrument threads/connections (including pythonnet/Kinesis PRM)
     # are cleanly shut down before the Python runtime exits to avoid access
     # violations from unmanaged drivers during interpreter shutdown.
@@ -86,10 +205,11 @@ def main() -> int:
     window.showMaximized()
     # Let the window paint once with placeholders + theme (no long blocking PyQtGraph build in __init__).
     app.processEvents()
-    # Qt equivalent of Tkinter after(): next event-loop tick — not before first frame (avoids long white flash).
-    QTimer.singleShot(0, window._complete_heavy_startup)
+    # Run immediately after first paint; no extra timer tick or ms delay before lazy UI + auto-connect.
+    window._complete_heavy_startup()
     return _run_event_loop(app)
 
 
 if __name__ == "__main__":
     sys.exit(main())
+ 

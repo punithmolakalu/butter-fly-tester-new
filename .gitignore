@@ -33,3 +33,7 @@ htmlcov/
 
 # Logs
 *.log
+
+# Local run outputs (do not commit)
+results/
+test results/

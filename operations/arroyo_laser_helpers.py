@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, cast
 
 
 def per_keep_laser_on_after_step(recipe: Optional[Dict[str, Any]]) -> bool:
@@ -114,7 +114,7 @@ def read_laser_output_on(arroyo: Any):
     if v is False or v == 0:
         return False
     try:
-        fv = float(v)
+        fv = float(cast(Any, v))
         if fv >= 0.5:
             return True
         return False
@@ -187,6 +187,10 @@ def per_laser_params_from_recipe(recipe: Dict[str, Any]) -> Tuple[float, float, 
     """
     Return (temp_C, drive_current_mA, current_limit_mA) for PER / laser prep.
     Order: OPERATIONS.PER, LIV, GENERAL.
+
+    **Current limit:** defaults to the **same value as the drive current** (``laser_set_current_limit`` =
+    ``laser_set_current``), so PER does not inherit LIV ``max_current_mA`` unless you set an explicit limit
+    under ``OPERATIONS.PER``: ``max_current_mA``, ``MaxCurrent``, or ``current_limit_mA`` (must be ≥ drive current).
     """
     g = recipe.get("GENERAL") or recipe.get("general") or {}
     op = recipe.get("OPERATIONS") or recipe.get("operations") or {}
@@ -205,11 +209,20 @@ def per_laser_params_from_recipe(recipe: Dict[str, Any]) -> Tuple[float, float, 
     if cur <= 0:
         cur = _to_float(g.get("Current"), 0) or _to_float(g.get("current"), 0)
     if cur <= 0:
+        # Match LIV Thorlabs calibration: drive at LIV max when PER/GENERAL omit current.
+        cur = _to_float(liv.get("max_current_mA"), 0)
+    if cur <= 0:
         cur = _to_float(liv.get("min_current_mA"), 0) or _to_float(liv.get("rated_current_mA"), 0)
 
-    lim = _to_float(liv.get("max_current_mA"), 0)
+    lim = (
+        _to_float(per.get("max_current_mA"), 0)
+        or _to_float(per.get("MaxCurrent"), 0)
+        or _to_float(per.get("current_limit_mA"), 0)
+        or _to_float(per.get("CurrentLimit_mA"), 0)
+    )
     if lim <= 0:
-        lim = max(cur * 1.2, cur + 200.0, 500.0) if cur > 0 else 1500.0
+        # Default: current limit = drive current for PER (see per_laser_params_from_recipe docstring).
+        lim = cur if cur > 0 else 1500.0
     if cur > 0:
         lim = max(lim, cur)
 
@@ -284,7 +297,10 @@ def apply_arroyo_recipe_and_laser_on_for_per(
                     "recipe allow_laser_readback_off — verify beam on Thorlabs)."
                 )
                 time.sleep(max(0.2, min(0.8, 0.15 + cur / 2000.0)))
-                _log("PER: Arroyo — laser ON command sent ({:.0f} mA set), TEC {:.1f} °C (readback not enforced).".format(cur, temp))
+                _log(
+                    "PER: Arroyo — laser ON command sent ({:.0f} mA drive, {:.0f} mA limit), TEC {:.1f} °C "
+                    "(readback not enforced).".format(cur, lim, temp)
+                )
                 return True, ""
             return False, "Laser did not turn ON (check Arroyo, interlocks, and recipe current)."
         if state is None:
@@ -296,7 +312,7 @@ def apply_arroyo_recipe_and_laser_on_for_per(
         # Brief settle so output stabilizes before PRM sweep / Thorlabs pre-check.
         time.sleep(max(0.2, min(0.8, 0.15 + cur / 2000.0)))
 
-        _log("PER: Arroyo — laser ON ({:.0f} mA set), TEC {:.1f} °C.".format(cur, temp))
+        _log("PER: Arroyo — laser ON ({:.0f} mA drive, {:.0f} mA limit), TEC {:.1f} °C.".format(cur, lim, temp))
         return True, ""
     except Exception as e:
         return False, str(e)

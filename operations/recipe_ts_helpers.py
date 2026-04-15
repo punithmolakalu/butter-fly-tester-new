@@ -3,7 +3,57 @@ Shared helpers for recipe load/display (numeric keys, alternate spellings).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+
+def extract_recipe_wavelength_nm(recipe: Any) -> Optional[float]:
+    """
+    Nominal laser wavelength (nm) from a loaded recipe dict.
+    Checks top-level, GENERAL, OPERATIONS.SPECTRUM (center), OPERATIONS.LIV, and legacy top-level LIV.
+    """
+    if not isinstance(recipe, dict):
+        return None
+
+    def _pos_float(v: Any) -> Optional[float]:
+        if v is None or v == "":
+            return None
+        try:
+            x = float(v)
+            return x if x > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    for k in ("Wavelength", "wavelength"):
+        w = _pos_float(recipe.get(k))
+        if w is not None:
+            return w
+    g = recipe.get("GENERAL") or recipe.get("general")
+    if isinstance(g, dict):
+        for k in ("Wavelength", "wavelength"):
+            w = _pos_float(g.get(k))
+            if w is not None:
+                return w
+    op = recipe.get("OPERATIONS") or recipe.get("operations") or {}
+    if isinstance(op, dict):
+        spec = op.get("SPECTRUM") or op.get("spectrum")
+        if isinstance(spec, dict):
+            for k in ("center_nm", "CenterWL", "wavelength", "Wavelength", "Center"):
+                w = _pos_float(spec.get(k))
+                if w is not None:
+                    return w
+        liv = op.get("LIV") or op.get("liv")
+        if isinstance(liv, dict):
+            for k in ("wavelength", "Wavelength"):
+                w = _pos_float(liv.get(k))
+                if w is not None:
+                    return w
+    liv_top = recipe.get("LIV")
+    if isinstance(liv_top, dict):
+        for k in ("wavelength", "Wavelength"):
+            w = _pos_float(liv_top.get(k))
+            if w is not None:
+                return w
+    return None
 
 
 def first_in_dict(blk: Any, keys: Tuple[str, ...], default: Any = "") -> Any:

@@ -1,5 +1,4 @@
 """Move windows to a specific screen (e.g. secondary monitor)."""
-from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QGuiApplication
 
 

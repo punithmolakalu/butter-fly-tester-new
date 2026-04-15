@@ -9,6 +9,7 @@ Commands reference: instrument_commands/PRM_Commands.md
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -40,6 +41,146 @@ TIMEOUT = 180000  # 3 min (same as working Tkinter app) for MoveTo/Home
 POLLING_RATE = 250
 DEFAULT_ACCEL = 10.0  # deg/s^2 (same as working Tkinter app)
 MAX_SPEED = 25.0  # max allowed speed in deg/s (PRM manual control limit)
+
+_SETTINGS_INIT_TIMEOUT_S = 10.0  # same order as WaitForSettingsInitialized(10000) ms
+
+
+def unwrap_deg_near_reference(reference_deg: float, position_deg: float) -> float:
+    """
+    Map a circle readback to the same physical angle but numerically closest to ``reference_deg``
+    within ``[reference_deg - 180, reference_deg + 180]``.
+
+    Kinesis often reports 360° where the recipe expects 0°. ``MoveTo(360 + 45)`` / shortest-path logic
+    can then drive **backwards** through 359… toward 45. Unwrapping 360 → 0 when ``reference_deg`` is 0
+    makes ``move_to(0 + 45)`` match manual **forward** motion through 0→45.
+    """
+    ref = float(reference_deg)
+    u = float(position_deg)
+    while u > ref + 180.0:
+        u -= 360.0
+    while u < ref - 180.0:
+        u += 360.0
+    return u
+
+
+def _move_to_command_deg(raw_read_deg: float, delta_deg: float) -> float:
+    """
+    Build the absolute angle (degrees) passed to Kinesis ``MoveTo`` for a short relative step.
+
+    Folds ``raw_read_deg + delta_deg`` into ``[0, 360)``. Thorlabs ``VerifyDeviceMovement`` often rejects
+    negative or out-of-span targets that appear when unwrapping readback against a recipe reference.
+    PER uses small |delta| (< 180°) so the shortest arc matches moving along the ring by ``delta``.
+    """
+    t = float(raw_read_deg) + float(delta_deg)
+    t = math.fmod(t, 360.0)
+    if t < 0.0:
+        t += 360.0
+    return float(round(t, 4))
+
+
+def _sleep_yielding(seconds: float) -> None:
+    """
+    When a QApplication exists, slice the wait and call processEvents() so the GUI stays responsive.
+    Thorlabs Kinesis/pythonnet is kept on the Qt GUI thread; moving connect() to a worker thread is unsafe,
+    so we yield during fixed delays instead of blocking with time.sleep().
+    """
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return
+    if s <= 0:
+        return
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            end = time.perf_counter() + s
+            while time.perf_counter() < end:
+                app.processEvents()
+                time.sleep(0.015)
+            return
+    except Exception:
+        pass
+    time.sleep(s)
+
+
+def _wait_for_settings_initialized_yielding(motor) -> None:
+    """Avoid blocking WaitForSettingsInitialized(10000) without processing Qt events."""
+    try:
+        if motor.IsSettingsInitialized():
+            return
+    except Exception:
+        pass
+    t0 = time.monotonic()
+    try:
+        while time.monotonic() - t0 < _SETTINGS_INIT_TIMEOUT_S:
+            try:
+                if motor.IsSettingsInitialized():
+                    return
+            except Exception:
+                pass
+            _sleep_yielding(0.05)
+        try:
+            motor.WaitForSettingsInitialized(500)  # type: ignore
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _disconnect_kinesis_motor_best_effort(motor) -> None:
+    """After a failed Connect, release the handle so a retry can succeed (per Thorlabs terminal test)."""
+    if motor is None:
+        return
+    try:
+        motor.Disconnect(True)  # type: ignore
+    except TypeError:
+        try:
+            motor.Disconnect()  # type: ignore
+        except Exception:
+            pass
+    except Exception:
+        try:
+            motor.Disconnect()  # type: ignore
+        except Exception:
+            pass
+
+
+def _connect_kinesis_motor_with_retry(motor, serial_no: str, log_fn: Callable[[str], None]) -> None:
+    """
+    Same sequence as tests/per_prm_thorlabs_terminal_test._connect_controller_with_retry:
+    BuildDeviceList, short delay, Connect; on failure (e.g. VerifyDeviceConnected) Disconnect and retry.
+    Intermittent USB/Kinesis timing often succeeds on the second attempt.
+    """
+    last_err: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            try:
+                DeviceManagerCLI.BuildDeviceList()  # type: ignore
+            except Exception:
+                pass
+            _sleep_yielding(0.2 if attempt == 1 else 0.4)
+            motor.Connect(serial_no)  # type: ignore
+            return
+        except Exception as e:
+            last_err = e
+            log_fn("[PRM] Connect attempt {} failed: {}".format(attempt, e))
+            _disconnect_kinesis_motor_best_effort(motor)
+            if attempt == 1:
+                log_fn("[PRM] Refreshing Kinesis device list and retrying Connect…")
+    if last_err is not None:
+        err_txt = str(last_err)
+        hint = ""
+        if "VerifyDeviceConnected" in err_txt or "not connected" in err_txt.lower():
+            hint = (
+                " Close the Thorlabs Kinesis desktop app if it is open (only one program may use the controller), "
+                "check USB/power, then try Connect again. "
+            )
+        raise RuntimeError(
+            "PRM could not open the device session.{}Details: {}".format(hint, err_txt)
+        ) from last_err
+    raise RuntimeError("PRM Connect failed after retries")
 
 
 def _normalize_serial(serial_number):  # type: ignore
@@ -193,19 +334,18 @@ class PRMConnection:
             raise RuntimeError("Failed to create device: {}".format(err)) from e
         if self.motor is None:
             raise RuntimeError("Failed to create device object")
-        self.motor.Connect(sn_to_use)  # type: ignore
-        time.sleep(0.5)
-        if not self.motor.IsSettingsInitialized():  # type: ignore
-            self.motor.WaitForSettingsInitialized(10000)  # type: ignore
+        _connect_kinesis_motor_with_retry(self.motor, sn_to_use, _log)
+        _sleep_yielding(0.5)
+        _wait_for_settings_initialized_yielding(self.motor)
         try:
             self.motor.LoadMotorConfiguration(sn_to_use)  # type: ignore
         except Exception:
             pass
-        time.sleep(0.5)
+        _sleep_yielding(0.5)
         self.motor.StartPolling(POLLING_RATE)  # type: ignore
-        time.sleep(0.5)
+        _sleep_yielding(0.5)
         self.motor.EnableDevice()  # type: ignore
-        time.sleep(0.5)
+        _sleep_yielding(0.5)
         self.connected = True
         _log("[PRM] Connected successfully.")
         # Prove the Kinesis session works (not just Create/Connect without working I/O).
@@ -249,19 +389,36 @@ class PRMConnection:
         target = Decimal(target_val)  # type: ignore
         self.motor.MoveTo(target, TIMEOUT)  # type: ignore
 
-    def move_relative(self, delta_degrees: float) -> None:
-        """Move by relative distance (degrees). Kinesis: MoveRelative()."""
+    def move_relative(self, delta_degrees: float, reference_deg: Optional[float] = None) -> None:
+        """
+        Move by a signed delta (degrees) using the **same Kinesis call as manual control**: ``MoveTo``.
+
+        KCube DCServo via pythonnet does not resolve ``GenericAdvancedMotorCLI.MoveRelative`` for
+        ``System.Decimal`` (or ``Decimal`` + timeout) on this stack — manual PRM uses ``move_to`` only.
+
+        Target is ``(get_position() + delta)`` folded into **``[0, 360)``** for ``MoveTo``. Thorlabs
+        ``VerifyDeviceMovement`` rejects many **negative** or out-of-range values produced by unwrapping
+        against ``reference_deg``. The optional ``reference_deg`` is kept for API compatibility; PER
+        should use **small** |delta| (< 180°) so each step follows the ring like manual control.
+        """
+        _ = reference_deg  # API compat with PER; folded target uses live readback only (VerifyDeviceMovement).
         if not self.connected or self.motor is None:
             raise RuntimeError("Device not connected")
-        delta = Decimal(float(delta_degrees))  # type: ignore
-        if hasattr(self.motor, "MoveRelative"):
-            self.motor.MoveRelative(delta, TIMEOUT)  # type: ignore
-        else:
-            try:
-                pos = self.get_position()
-                self.move_to((pos or 0) + float(delta_degrees))
-            except Exception:
-                raise RuntimeError("MoveRelative not supported and position read failed")
+        pos = self.get_position()
+        if pos is None:
+            raise RuntimeError("Cannot move relative: PRM position read failed")
+        d = float(delta_degrees)
+        if abs(d) < 1e-9:
+            return
+        r = float(pos)
+        cmd = _move_to_command_deg(r, d)
+        cur = _move_to_command_deg(r, 0.0)
+        circ = abs(cmd - cur)
+        if circ > 180.0:
+            circ = 360.0 - circ
+        if circ < 0.03:
+            return
+        self.move_to(cmd)
 
     def get_max_velocity(self) -> float:
         """Return max velocity (deg/s). Same as working Tkinter: GetVelocityParams().MaxVelocity."""

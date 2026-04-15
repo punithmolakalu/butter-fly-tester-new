@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QPlainTextEdit,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QShowEvent
 
 try:
@@ -29,6 +29,8 @@ except ImportError:
     pg = None
 
 from view.dark_theme import get_dark_palette, main_stylesheet, set_dark_title_bar
+from view.temperature_stability_plot import compact_simple_xy_plot_axes
+from view.plot_series_checkboxes import freeze_plot_navigation
 from operations.per.per_units import mw_series_to_dbm, mw_to_dbm
 
 
@@ -158,6 +160,8 @@ class PerTestSequenceWindow(QMainWindow):
                 pen=pg.mkPen("#1f77b4", width=1.5),
                 antialias=True,
             )
+            freeze_plot_navigation(p)
+            compact_simple_xy_plot_axes(p, pw)
             right_layout.addWidget(pw, 1)
 
         self._result_label = QLabel("Max (dBm): —   Min (dBm): —   PER (dB): —   Angle (°): —")
@@ -181,21 +185,20 @@ class PerTestSequenceWindow(QMainWindow):
             else:
                 lbl.setText(_fmt(v))
 
-    def _rolling(self, seq):
-        if not seq:
-            return seq
-        if len(seq) <= LIVE_PLOT_MAX_POINTS:
-            return seq
-        return seq[-LIVE_PLOT_MAX_POINTS:]
-
+    @pyqtSlot(object, object, object)
     def update_live(self, result, angles, powers_mw):
         self._angles = list(angles or [])
         self._powers_mw = list(powers_mw or [])
         n = min(len(self._angles), len(self._powers_mw))
 
         if self._curve is not None and n:
-            y_dbm = mw_series_to_dbm(self._rolling(self._powers_mw[:n]))
-            self._curve.setData(self._rolling(self._angles[:n]), y_dbm)
+            ax = self._angles[:n]
+            pw = self._powers_mw[:n]
+            if len(ax) > LIVE_PLOT_MAX_POINTS:
+                ax = ax[-LIVE_PLOT_MAX_POINTS:]
+                pw = pw[-LIVE_PLOT_MAX_POINTS:]
+            y_dbm = mw_series_to_dbm(pw)
+            self._curve.setData(ax, y_dbm)
         if result is not None:
             mx = getattr(result, "max_power", None)
             mn = getattr(result, "min_power", None)

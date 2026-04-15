@@ -14,6 +14,12 @@ import time
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
+from instruments.visa_safe import (
+    pyvisa_open_lock,
+    safe_close_pyvisa_resource,
+    safe_close_pyvisa_resource_manager,
+)
+
 warnings.filterwarnings("ignore", category=UserWarning, module="gpib_ctypes")
 
 try:
@@ -69,16 +75,41 @@ def scan_gpib_resources() -> List[str]:
         except Exception:
             pass
 
+    rm = None
     try:
-        add_gpib_from_rm(pyvisa.ResourceManager())
+        rm = pyvisa.ResourceManager()
+        add_gpib_from_rm(rm)
     except Exception:
         pass
+    finally:
+        safe_close_pyvisa_resource_manager(rm)
+
+    rm_py = None
     try:
-        add_gpib_from_rm(pyvisa.ResourceManager("@py"))
+        rm_py = pyvisa.ResourceManager("@py")
+        add_gpib_from_rm(rm_py)
     except Exception:
         pass
+    finally:
+        safe_close_pyvisa_resource_manager(rm_py)
 
     return sorted(merged)
+
+
+def _gpib_addresses_to_try(primary: str) -> List[str]:
+    """Try the configured GPIB string first, then the alternate interface (0 ↔ 1) for the same primary address."""
+    primary = (primary or "").strip()
+    if not primary:
+        primary = "GPIB0::1::INSTR"
+    out: List[str] = [primary]
+    m = re.match(r"GPIB(\d+)::(\d+)::INSTR", primary, re.I)
+    if m:
+        iface, addr = m.group(1), m.group(2)
+        alt_iface = "1" if iface == "0" else "0"
+        alt = f"GPIB{alt_iface}::{addr}::INSTR"
+        if alt.upper() not in {x.upper() for x in out}:
+            out.append(alt)
+    return out
 
 
 def probe_gpib_andos(timeout_ms: int = 2000, addresses=None) -> List[tuple]:
@@ -90,18 +121,23 @@ def probe_gpib_andos(timeout_ms: int = 2000, addresses=None) -> List[tuple]:
         return []
     results = []
     rm = None
-    for addr in addrs:
-        try:
-            if rm is None:
-                rm = pyvisa.ResourceManager()
-            res = rm.open_resource(addr, open_timeout=500)
-            res.timeout = timeout_ms
-            idn = res.query("*IDN?").strip()
-            res.close()
-            if idn:
-                results.append((addr, idn))
-        except Exception:
-            pass
+    try:
+        for addr in addrs:
+            res = None
+            try:
+                if rm is None:
+                    rm = pyvisa.ResourceManager()
+                res = rm.open_resource(addr, open_timeout=500)
+                res.timeout = timeout_ms
+                idn = res.query("*IDN?").strip()
+                if idn:
+                    results.append((addr, idn))
+            except Exception:
+                pass
+            finally:
+                safe_close_pyvisa_resource(res)
+    finally:
+        safe_close_pyvisa_resource_manager(rm)
     return results
 
 
@@ -124,64 +160,62 @@ class AndoConnection:
     def connect(self, address=None) -> bool:
         if not self.enabled or not PYVISA_AVAILABLE:
             return False
-        addr = (address or self.gpib_address).strip()
-        if not addr:
+        primary = (address or self.gpib_address).strip()
+        if not primary:
             return False
-        timeout_ms = max(10000, int(self.timeout * 1000))
-        open_timeout_ms = max(10000, timeout_ms)
-        for backend in (None, "@py"):
-            try:
-                if self.gpib_connection:
-                    try:
-                        self.gpib_connection.close()
-                    except Exception:
-                        pass
-                    self.gpib_connection = None
-                if self.rm:
-                    try:
-                        self.rm.close()
-                    except Exception:
-                        pass
-                    self.rm = None
-                self.rm = pyvisa.ResourceManager(backend) if backend else pyvisa.ResourceManager()
+        # Session timeout: default 5 s (self.timeout). Open can need slightly longer on USB-GPIB.
+        timeout_ms = max(5000, int(self.timeout * 1000))
+        open_timeout_ms = max(8000, timeout_ms)
+        for addr in _gpib_addresses_to_try(primary):
+            for backend in (None, "@py"):
                 try:
-                    self.gpib_connection = self.rm.open_resource(addr, open_timeout=open_timeout_ms)
-                except TypeError:
-                    self.gpib_connection = self.rm.open_resource(addr)
-                conn = self.gpib_connection
-                if conn is None:
-                    continue
-                conn.timeout = timeout_ms
-                conn.write_termination = "\n"
-                conn.read_termination = "\n"
-                time.sleep(0.2)
-                idn = conn.query("*IDN?")
-                if idn is not None and str(idn).strip():
-                    self.connected = True
-                    self.write_command("REMOTE")
-                    time.sleep(0.1)
-                    # Clear host read buffer so the next query is not a stale *IDN? line (USB-GPIB).
-                    try:
-                        from pyvisa.constants import BufferOperation
-
-                        conn.flush(BufferOperation.read_buf)
-                    except Exception:
+                    with pyvisa_open_lock():
+                        if self.gpib_connection:
+                            safe_close_pyvisa_resource(self.gpib_connection)
+                            self.gpib_connection = None
+                        if self.rm:
+                            safe_close_pyvisa_resource_manager(self.rm)
+                            self.rm = None
+                        self.rm = pyvisa.ResourceManager(backend) if backend else pyvisa.ResourceManager()
                         try:
-                            conn.flush()  # type: ignore[call-arg]
-                        except Exception:
-                            pass
-                    return True
-                conn.close()
-                self.gpib_connection = None
-            except Exception:
-                if self.gpib_connection:
-                    try:
-                        self.gpib_connection.close()
-                    except Exception:
-                        pass
+                            self.gpib_connection = self.rm.open_resource(addr, open_timeout=open_timeout_ms)
+                        except TypeError:
+                            self.gpib_connection = self.rm.open_resource(addr)
+                        conn = self.gpib_connection
+                        if conn is None:
+                            continue
+                        conn.timeout = timeout_ms
+                        conn.write_termination = "\n"
+                        conn.read_termination = "\n"
+                        time.sleep(0.2)
+                        idn = conn.query("*IDN?")
+                        if idn is not None and str(idn).strip():
+                            self.connected = True
+                            self.gpib_address = addr
+                            self.write_command("REMOTE")
+                            time.sleep(0.1)
+                            # Clear host read buffer so the next query is not a stale *IDN? line (USB-GPIB).
+                            try:
+                                from pyvisa.constants import BufferOperation
+
+                                conn.flush(BufferOperation.read_buf)
+                            except Exception:
+                                try:
+                                    conn.flush()  # type: ignore[call-arg]
+                                except Exception:
+                                    pass
+                            return True
+                        safe_close_pyvisa_resource(conn)
+                        self.gpib_connection = None
+                except Exception:
+                    if self.gpib_connection:
+                        safe_close_pyvisa_resource(self.gpib_connection)
                     self.gpib_connection = None
-                if backend == "@py":
-                    break
+                    if self.rm:
+                        safe_close_pyvisa_resource_manager(self.rm)
+                        self.rm = None
+                    if backend == "@py":
+                        break
         self.connected = False
         return False
 
@@ -190,11 +224,14 @@ class AndoConnection:
             try:
                 self.set_local_mode()
                 time.sleep(0.1)
-                self.gpib_connection.close()
             except Exception:
                 pass
+            safe_close_pyvisa_resource(self.gpib_connection)
             self.gpib_connection = None
             self.connected = False
+        if self.rm:
+            safe_close_pyvisa_resource_manager(self.rm)
+            self.rm = None
 
     def is_connected(self) -> bool:
         return bool(self.connected and self.gpib_connection is not None)
@@ -371,6 +408,36 @@ class AndoConnection:
     def set_center_wl(self, wavelength_nm: float) -> bool:
         return self.set_center_wavelength(wavelength_nm)
 
+    def set_wavelength_shift_nm(self, shift_nm: float) -> bool:
+        """
+        Wavelength shift on the trace axis (AQ6317-style ``WLSFT`` / ``WLSHIFT``).
+        Positive values shift displayed wavelength in the +nm direction per instrument manual.
+        """
+        if not self.is_connected():
+            return False
+        try:
+            sh = float(shift_nm)
+        except (TypeError, ValueError):
+            return False
+        # Short form per instrument_commands/Ando_Commands.md
+        if self.write_command("WLSFT {:.6f}".format(sh)):
+            return True
+        return self.write_command("WLSHIFT {:.6f}".format(sh))
+
+    def get_wavelength_shift_nm(self) -> Optional[float]:
+        """Query wavelength shift (nm) if the firmware supports ``WLSFT?``."""
+        if not self.is_connected():
+            return None
+        r = self.query("WLSFT?")
+        if r is None:
+            r = self.query("WLSHIFT?")
+        if r is None:
+            return None
+        try:
+            return float(str(r).strip().split()[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+
     def set_span(self, span_nm: float) -> bool:
         return self.is_connected() and self.write_command(f"SPAN {span_nm:.3f}")
 
@@ -471,12 +538,23 @@ class AndoConnection:
             return None
 
     def query_spectral_width_nm(self):
-        """Spectral width result (nm), if analysis populated."""
+        """
+        Spectral width at -3 dB (FWHM-style, nm) from SPWD? — same register as the OSA width readout
+        after analysis. Parse the first numeric field only (comma/semicolon-separated replies).
+        """
         r = self.query("SPWD?")
+        self._last_spwd_raw_reply = None if r is None else str(r).strip()
         if r is None:
             return None
         try:
-            return float(str(r).strip().split(",")[0])
+            s = str(r).strip()
+            if not s:
+                return None
+            for sep in (",", ";"):
+                if sep in s:
+                    s = s.split(sep, 1)[0].strip()
+                    break
+            return float(s)
         except (TypeError, ValueError, IndexError):
             return None
 
@@ -529,16 +607,42 @@ class AndoConnection:
         if len(parts) < 3:
             return {"raw": raw, "fields": parts}
         out: Dict[str, Any] = {"raw": raw, "fields": parts}
-        try:
-            out["WD_3dB_nm"] = float(parts[0])
-            out["PK_WL_nm"] = float(parts[1])
-            out["PK_LVL_dBm"] = float(parts[2])
-            if len(parts) >= 4:
-                out["EXTRA_nm"] = float(parts[3])
-            if len(parts) >= 5:
-                out["SMSR_dB"] = float(parts[4])
-        except (TypeError, ValueError, IndexError):
-            return {"raw": raw, "fields": parts}
+        # Many AQ6317B builds return **4** fields on ANA? for DFB: PK λ, PK level, SMSR, mode offset
+        # (no linewidth). A naive 5-field map would mis-label peak λ as WD_3dB and drop SMSR.
+        if len(parts) == 4:
+            try:
+                f0 = float(str(parts[0]).strip().replace(",", "."))
+                f1 = float(str(parts[1]).strip().replace(",", "."))
+            except (TypeError, ValueError):
+                f0, f1 = None, None
+            if f0 is not None and f1 is not None:
+                if 300.0 <= f0 <= 2600.0 and abs(f1) < 120.0:
+                    out["PK_WL_nm"] = f0
+                    out["PK_LVL_dBm"] = f1
+                    try:
+                        out["SMSR_dB"] = float(str(parts[2]).strip().replace(",", "."))
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        out["MODE_OFFSET_nm"] = float(str(parts[3]).strip().replace(",", "."))
+                    except (TypeError, ValueError):
+                        pass
+                    return out
+        # 5-field (and longer): WD, PK λ, PK level, extra, SMSR, …
+        _keys = (
+            ("WD_3dB_nm", 0),
+            ("PK_WL_nm", 1),
+            ("PK_LVL_dBm", 2),
+            ("EXTRA_nm", 3),
+            ("SMSR_dB", 4),
+        )
+        for key, idx in _keys:
+            if len(parts) <= idx:
+                break
+            try:
+                out[key] = float(str(parts[idx]).strip().replace(",", "."))
+            except (TypeError, ValueError, IndexError):
+                continue
         return out
 
     def query_analysis_ana(self, analysis_hint: str = "") -> Optional[Dict[str, Any]]:
@@ -580,6 +684,11 @@ class AndoConnection:
                 out["PK_WL_nm"] = float(parts[2])
                 out["PK_LVL_dBm"] = float(parts[3])
                 out["SPEC_WD_nm"] = float(parts[4])
+            elif len(parts) == 5 and "LED" not in a:
+                # Some firmware returns the same 5-field CSV on ANAR? as on ANA? (width, λpk, Lpk, …).
+                ana_like = self._parse_ana_numeric_response(r)
+                if isinstance(ana_like, dict) and self._analysis_dict_has_numeric_peak(ana_like):
+                    return ana_like
             elif len(parts) >= 4:
                 # DFB / FP / default 4-field: PK WL, PK LVL, SMSR, MODE OFFSET
                 out["PK_WL_nm"] = float(parts[0])
@@ -594,12 +703,48 @@ class AndoConnection:
             pass
         return out
 
-    def read_all_analysis_results(self, analysis_hint: str = "DFB-LD") -> Optional[Tuple[float, float, float]]:
+    @staticmethod
+    def sanitize_width_vs_sweep_span(fwhm_nm: Optional[float], sweep_span_nm: Optional[float]) -> Optional[float]:
         """
-        Return one tuple (fwhm_nm, smsr_dB, peak_wl_nm) from ANA?/ANAR? with PKWL/SPWD/SMSR? fallbacks.
+        Some AQ6317B firmware echoes the **measurement span** (nm) in ANA? field 0 or SPWD? when the true
+        -3 dB width is much smaller — e.g. span 2 nm vs real linewidth ~0.07 nm. Drop the bogus width so
+        callers can fall back to spectrum-style reads / trace logic.
+        """
+        if fwhm_nm is None or sweep_span_nm is None:
+            return fwhm_nm
+        try:
+            fw = float(fwhm_nm)
+            sp = float(sweep_span_nm)
+        except (TypeError, ValueError):
+            return fwhm_nm
+        if sp <= 0:
+            return fwhm_nm
+        # Span is often echoed as "FWHM" within a few %; allow a wider match than 1.5 % so 2.00 vs 2.05 still rejects.
+        tol = max(0.12, 0.06 * abs(sp))
+        if abs(fw - sp) <= tol:
+            return None
+        # On narrow sweeps (≤5 nm), a linewidth ≥85 % of span is almost never physical for typical DFBs — treat as span echo.
+        if sp <= 5.0 and fw >= 0.85 * sp and fw >= 0.25:
+            return None
+        return fwhm_nm
 
-        Intended for VBG-style stability: after SGL + analysis mode (DFBAN/LEDAN/FPAN) + peak search,
-        read the same quantities the reference ``read_all_analysis_results()`` returns from the Ando.
+    def read_all_analysis_results(
+        self,
+        analysis_hint: str = "DFB-LD",
+        *,
+        sweep_span_nm: Optional[float] = None,
+        debug_out: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Tuple[float, float, float]]:
+        """
+        Return one tuple (fwhm_nm, smsr_dB, peak_wl_nm) from ANA?/ANAR? with PKWL/SMSR? fallbacks.
+
+        FWHM (-3 dB width, nm) prefers **SPWD?** when present (instrument register matching the readout);
+        ANA ``WD_3dB_nm`` / ANAR ``SPEC_WD_nm`` fill in if SPWD is missing.
+
+        Intended for VBG-style stability: after SGL + analysis mode (DFBAN/LEDAN/FPAN), read the same
+        quantities the reference ``read_all_analysis_results()`` returns from the Ando (callers may omit PKSR).
+
+        Pass ``sweep_span_nm`` (recipe narrow span) so a width equal to the sweep span is treated as invalid.
         """
         ana = self.query_analysis_ana(analysis_hint)
         anar = self.query_analysis_anar(analysis_hint)
@@ -640,18 +785,61 @@ class AndoConnection:
                     pass
         if pk_wl is None:
             pk_wl = self.query_peak_wavelength_nm()
-        if fwhm is None:
-            fwhm = self.query_spectral_width_nm()
         if smsr is None:
             smsr = self.query_smsr_db()
+        # SMSR? / MSR? on many AQ6317B builds returns ``1`` (status-style), not dB — prefer ANA? CSV field 5.
+        if isinstance(ana, dict):
+            fld = ana.get("fields")
+            if isinstance(fld, (list, tuple)) and len(fld) >= 5:
+                try:
+                    alt = float(str(fld[4]).strip().replace(",", "."))
+                    if smsr is None or (smsr is not None and 0.5 <= float(smsr) <= 2.0):
+                        smsr = alt
+                except (TypeError, ValueError):
+                    pass
+        fwhm_from_ana_anar = fwhm
+        # Prefer SPWD? for width: dedicated post-analysis register (matches panel / -3 dB width exactly).
+        # ANA WD_3dB_nm / ANAR SPEC_WD_nm are fallbacks when SPWD is unavailable.
+        spwd = self.query_spectral_width_nm()
+        if spwd is not None:
+            fwhm = float(spwd)
+        fwhm_after_spwd = fwhm
+        fwhm = self.sanitize_width_vs_sweep_span(fwhm, sweep_span_nm)
+        # SPWD? often echoes sweep span; sanitize clears it. Prefer ANA/ANAR width when still valid.
+        if fwhm is None and fwhm_from_ana_anar is not None:
+            try:
+                fwhm = self.sanitize_width_vs_sweep_span(float(fwhm_from_ana_anar), sweep_span_nm)
+            except (TypeError, ValueError):
+                pass
+        if debug_out is not None:
+            debug_out.clear()
+            ar = str((ana or {}).get("raw", "")) if isinstance(ana, dict) else ""
+            arr = str((anar or {}).get("raw", "")) if isinstance(anar, dict) else ""
+            debug_out["sweep_span_nm"] = sweep_span_nm
+            debug_out["ANA_reply"] = ar[:400]
+            debug_out["ANAR_reply"] = arr[:400]
+            debug_out["SPWD_reply"] = str(getattr(self, "_last_spwd_raw_reply", "") or "")[:400]
+            debug_out["fwhm_nm_from_ana_anar"] = fwhm_from_ana_anar
+            debug_out["fwhm_nm_after_SPWD_parse"] = fwhm_after_spwd
+            debug_out["fwhm_nm_final"] = fwhm
+            debug_out["span_echo_rejected"] = bool(
+                fwhm_after_spwd is not None and fwhm is None and sweep_span_nm is not None
+            )
         if pk_wl is None and fwhm is None:
             return None
         return (fwhm, smsr, pk_wl)
 
-    def wait_sweep_done(self, timeout_s: float = 180.0, poll_s: float = 0.25) -> bool:
-        """Poll SWEEP? until idle or timeout."""
+    def wait_sweep_done(self, timeout_s: float = 180.0, poll_s: float = 0.05,
+                         stop_requested: Any = None) -> bool:
+        """Poll SWEEP? until idle, timeout, or stop_requested() returns True.
+
+        Default poll interval is 50 ms so trace read starts soon after the sweep ends (was 250 ms).
+        """
         t0 = time.time()
         while (time.time() - t0) < float(timeout_s):
+            if callable(stop_requested) and stop_requested():
+                self.stop_sweep()
+                return False
             if self.is_sweep_done():
                 return True
             time.sleep(float(poll_s))
@@ -810,7 +998,7 @@ class AndoConnection:
             return []
         try:
             conn.write(c)
-            time.sleep(0.06)
+            time.sleep(0.03)
             raw = self._read_gpib_full_binary_response(conn)
             if not raw:
                 return []
@@ -929,7 +1117,7 @@ class AndoConnection:
                 pass
             try:
                 conn.write(cmd.rstrip("\n"))
-                time.sleep(0.08)
+                time.sleep(0.04)
                 raw = self._read_gpib_full_binary_response(conn)
                 if not raw:
                     txt = conn.read()
@@ -1032,6 +1220,15 @@ class AndoConnection:
         try:
             self.write_command("REMOTE")
             time.sleep(0.02)
+            return self.write_command("STP")
+        except Exception:
+            return False
+
+    def stop_sweep_fast(self) -> bool:
+        """Send STP only (minimal delay). Use before closing the GUI or tearing down VISA."""
+        if not self.is_connected():
+            return False
+        try:
             return self.write_command("STP")
         except Exception:
             return False
